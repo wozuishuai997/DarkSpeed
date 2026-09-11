@@ -15,6 +15,13 @@
 
 typedef NSString * HUDUserDefaultsKey;
 
+// 保留原来布尔设置的 0/1 含义，时间模式追加为 2。
+typedef NS_ENUM(NSInteger, HUDDisplayMode) {
+    HUDDisplayModeSpeed = 0,
+    HUDDisplayModeFPS NS_SWIFT_NAME(fps) = 1,
+    HUDDisplayModeTime = 2,
+};
+
 static HUDUserDefaultsKey const HUDUserDefaultsKeySelectedMode = @"selectedMode";
 static HUDUserDefaultsKey const HUDUserDefaultsKeySelectedModeLandscape = @"selectedModeLandscape";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyCurrentPositionY = @"currentPositionY";

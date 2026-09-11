@@ -535,14 +535,14 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [self saveUserDefaults];
 }
 
-- (BOOL)displayMode
+- (HUDDisplayMode)displayMode
 {
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeyDisplayMode];
-    return mode != nil ? [mode boolValue] : NO;
+    return (HUDDisplayMode)mode.integerValue;
 }
 
-- (void)setDisplayMode:(BOOL)displayMode
+- (void)setDisplayMode:(HUDDisplayMode)displayMode
 {
     [self loadUserDefaults:NO];
     [_userDefaults setObject:@(displayMode) forKey:HUDUserDefaultsKeyDisplayMode];
@@ -627,6 +627,10 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
 - (void)settingDidSelectWithKey:(NSString * _Nonnull)key
 {
+    if ([key isEqualToString:HUDUserDefaultsKeyDisplayMode]) {
+        [self setDisplayMode:(HUDDisplayMode)(([self displayMode] + 1) % 3)];
+        return;
+    }
     BOOL highlighted = [self settingHighlightedWithKey:key];
     [_userDefaults setObject:@(!highlighted) forKey:key];
     [self saveUserDefaults];
@@ -637,9 +641,13 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     HUDPresetPosition selectedMode = [self selectedModeForCurrentOrientation];
     BOOL isCentered = (selectedMode == HUDPresetPositionTopCenter || selectedMode == HUDPresetPositionTopCenterMost);
     BOOL isCenteredMost = (selectedMode == HUDPresetPositionTopCenterMost);
-    [_topLeftButton setSelected:(selectedMode == HUDPresetPositionTopLeft)];
+    BOOL isLeftMost = (selectedMode == HUDPresetPositionTopLeftMost);
+    BOOL isRightMost = (selectedMode == HUDPresetPositionTopRightMost);
+    [_topLeftButton setSelected:(selectedMode == HUDPresetPositionTopLeft || isLeftMost)];
     [_topCenterButton setSelected:isCentered];
-    [_topRightButton setSelected:(selectedMode == HUDPresetPositionTopRight)];
+    [_topRightButton setSelected:(selectedMode == HUDPresetPositionTopRight || isRightMost)];
+    [_topLeftButton setImage:[UIImage systemImageNamed:(isLeftMost ? @"arrow.up.to.line" : @"arrow.up.left")] forState:UIControlStateNormal];
+    [_topRightButton setImage:[UIImage systemImageNamed:(isRightMost ? @"arrow.up.to.line" : @"arrow.up.right")] forState:UIControlStateNormal];
     UIImage *topCenterImage = (isCenteredMost ? [UIImage systemImageNamed:@"arrow.up.to.line"] : [UIImage systemImageNamed:@"arrow.up"]);
     [_topCenterButton setImage:topCenterImage forState:UIControlStateNormal];
 }
@@ -657,14 +665,18 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 - (void)tapTopLeftButton:(UIButton *)sender
 {
     log_debug(OS_LOG_DEFAULT, "- [RootViewController tapTopLeftButton:%{public}@]", sender);
-    [self setSelectedModeForCurrentOrientation:HUDPresetPositionTopLeft];
+    HUDPresetPosition selectedMode = [self selectedModeForCurrentOrientation];
+    [self setSelectedModeForCurrentOrientation:(selectedMode == HUDPresetPositionTopLeft && _supportsCenterMost
+        ? HUDPresetPositionTopLeftMost : HUDPresetPositionTopLeft)];
     [self reloadModeButtonState];
 }
 
 - (void)tapTopRightButton:(UIButton *)sender
 {
     log_debug(OS_LOG_DEFAULT, "- [RootViewController tapTopRightButton:%{public}@]", sender);
-    [self setSelectedModeForCurrentOrientation:HUDPresetPositionTopRight];
+    HUDPresetPosition selectedMode = [self selectedModeForCurrentOrientation];
+    [self setSelectedModeForCurrentOrientation:(selectedMode == HUDPresetPositionTopRight && _supportsCenterMost
+        ? HUDPresetPositionTopRightMost : HUDPresetPositionTopRight)];
     [self reloadModeButtonState];
 }
 

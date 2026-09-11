@@ -129,7 +129,7 @@ static uint8_t HUD_SHOW_DOWNLOAD_SPEED_FIRST = 1;
 static uint8_t HUD_SHOW_SECOND_SPEED_IN_NEW_LINE = 0;
 static const char *HUD_UPLOAD_PREFIX = "▲";
 static const char *HUD_DOWNLOAD_PREFIX = "▼";
-static uint8_t HUD_DISPLAY_MODE = 0;  // 0=Speed, 1=FPS
+static HUDDisplayMode HUD_DISPLAY_MODE = HUDDisplayModeSpeed;
 
 typedef struct {
     uint64_t inputBytes;
@@ -610,8 +610,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
         [_containerView setupContainerAsDisplayContentInScreenshots];
     }
 
-    BOOL displayMode = [self displayMode];
-    HUD_DISPLAY_MODE = displayMode;
+    HUD_DISPLAY_MODE = [self displayMode];
 
     prevInputBytes = 0;
     prevOutputBytes = 0;
@@ -669,11 +668,11 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     return mode != nil ? [mode boolValue] : NO;
 }
 
-- (BOOL)displayMode
+- (HUDDisplayMode)displayMode
 {
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeyDisplayMode];
-    return mode != nil ? [mode boolValue] : NO;
+    return (HUDDisplayMode)mode.integerValue;
 }
 
 - (BOOL)usesBitrate
@@ -800,7 +799,15 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 {
     log_debug(OS_LOG_DEFAULT, "updateSpeedLabel");
     NSAttributedString *attributedText;
-    if (HUD_DISPLAY_MODE == 1) {
+    if (HUD_DISPLAY_MODE == HUDDisplayModeTime) {
+        // 与 SpringBoard 渲染器一致，使用系统的时分格式。
+        NSString *time = [NSDateFormatter localizedStringFromDate:NSDate.date
+                                                      dateStyle:NSDateFormatterNoStyle
+                                                      timeStyle:NSDateFormatterShortStyle];
+        attributedText = [[NSAttributedString alloc] initWithString:time attributes:@{
+            NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT]
+        }];
+    } else if (HUD_DISPLAY_MODE == HUDDisplayModeFPS) {
         attributedText = formattedFPSAttributedString(_isFocused);
     } else {
         attributedText = formattedAttributedString(_isFocused);
@@ -904,6 +911,8 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     HUDPresetPosition selectedMode = [self selectedModeForCurrentOrientation];
     BOOL isCentered = (selectedMode == HUDPresetPositionTopCenter || selectedMode == HUDPresetPositionTopCenterMost);
     BOOL isCenteredMost = (selectedMode == HUDPresetPositionTopCenterMost);
+    BOOL isTopMost = isCenteredMost || selectedMode == HUDPresetPositionTopLeftMost ||
+                     selectedMode == HUDPresetPositionTopRightMost;
     BOOL isPad = ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad);
 
     HUD_SHOW_DOWNLOAD_SPEED_FIRST = isCentered;
@@ -975,7 +984,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
             [_contentView.trailingAnchor constraintEqualToAnchor:layoutGuide.trailingAnchor constant:realCustomOffsetX],
         ]];
 
-        if (isCenteredMost && !isPad) {
+        if (isTopMost && !isPad) {
             [_constraints addObject:[_contentView.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:0]];
         }
         else
@@ -1028,13 +1037,15 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
         [_constraints addObject:_centerXConstraint];
     }
 
-    _leadingConstraint = [_speedLabel.leadingAnchor constraintEqualToAnchor:_contentView.leadingAnchor constant:10];
-    if (selectedMode == HUDPresetPositionTopLeft) {
+    // 顶部两侧避开屏幕圆角，普通高度和横屏保持原有边距。
+    CGFloat sidePadding = isTopMost && !isLandscape ? MAX(10.0, self.view.safeAreaInsets.top) : 10.0;
+    _leadingConstraint = [_speedLabel.leadingAnchor constraintEqualToAnchor:_contentView.leadingAnchor constant:sidePadding];
+    if (selectedMode == HUDPresetPositionTopLeft || selectedMode == HUDPresetPositionTopLeftMost) {
         [_constraints addObject:_leadingConstraint];
     }
 
-    _trailingConstraint = [_speedLabel.trailingAnchor constraintEqualToAnchor:_contentView.trailingAnchor constant:-10];
-    if (selectedMode == HUDPresetPositionTopRight) {
+    _trailingConstraint = [_speedLabel.trailingAnchor constraintEqualToAnchor:_contentView.trailingAnchor constant:-sidePadding];
+    if (selectedMode == HUDPresetPositionTopRight || selectedMode == HUDPresetPositionTopRightMost) {
         [_constraints addObject:_trailingConstraint];
     }
 
@@ -1083,7 +1094,8 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     BOOL isCentered = (selectedMode == HUDPresetPositionTopCenter || selectedMode == HUDPresetPositionTopCenterMost);
 
     CGFloat topTrans = CGRectGetHeight(view.bounds) * (scaleFactor / 2);
-    CGFloat leadingTrans = (isCentered ? 0 : (selectedMode == HUDPresetPositionTopLeft ? CGRectGetWidth(view.bounds) * (scaleFactor / 2) : -CGRectGetWidth(view.bounds) * (scaleFactor / 2)));
+    BOOL isLeft = selectedMode == HUDPresetPositionTopLeft || selectedMode == HUDPresetPositionTopLeftMost;
+    CGFloat leadingTrans = (isCentered ? 0 : (isLeft ? CGRectGetWidth(view.bounds) * (scaleFactor / 2) : -CGRectGetWidth(view.bounds) * (scaleFactor / 2)));
 
     if (beginFromInitialState)
         [view setTransform:CGAffineTransformIdentity];
@@ -1188,7 +1200,8 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     HUDPresetPosition selectedMode = [self selectedModeForCurrentOrientation];
     BOOL isCentered = (selectedMode == HUDPresetPositionTopCenter || selectedMode == HUDPresetPositionTopCenterMost);
 
-    if (isCentered || [self keepInPlace])
+    BOOL isTopMost = selectedMode == HUDPresetPositionTopLeftMost || selectedMode == HUDPresetPositionTopRightMost;
+    if (isCentered || (isTopMost && ![self isLandscapeOrientation]) || [self keepInPlace])
     {
         if (sender.state == UIGestureRecognizerStateBegan)
             [self cancelPreviousPerformRequestsWithTarget:sender.view];

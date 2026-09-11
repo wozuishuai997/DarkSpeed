@@ -8,6 +8,7 @@
 import UIKit
 
 @objc public protocol TSSettingsControllerDelegate {
+    func displayMode() -> HUDDisplayMode
     func settingHighlighted(key: String) -> Bool
     func settingDidSelect(key: String) -> Void
 }
@@ -27,7 +28,7 @@ import UIKit
     }
 
     open override func settingSubtitle(index: Int, highlighted: Bool) -> String? {
-        return TSSettingsIndex.allCases[index].subtitle(highlighted: highlighted, restartRequired: restartRequired)
+        return TSSettingsIndex.allCases[index].subtitle(highlighted: highlighted, restartRequired: restartRequired, displayMode: delegate?.displayMode() ?? .speed)
     }
 
     private func settingKey(index: Int) -> String {
@@ -38,12 +39,12 @@ import UIKit
         return delegate?.settingHighlighted(key: settingKey(index: index)) ?? false
     }
 
-    private var isFPSMode: Bool {
-        return delegate?.settingHighlighted(key: HUDUserDefaultsKeyDisplayMode) ?? false
+    private var isSpeedMode: Bool {
+        return (delegate?.displayMode() ?? .speed) == .speed
     }
 
     open override func settingEnabled(index: Int) -> Bool {
-        guard isFPSMode else { return true }
+        guard !isSpeedMode else { return true }
         let setting = TSSettingsIndex.allCases[index]
         switch setting {
         case .singleLineMode, .usesArrowPrefixes, .usesBitrate:

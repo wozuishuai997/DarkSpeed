@@ -651,7 +651,14 @@ static NSString *ds_display_text(NSDictionary *preferences,
                                  BOOL focused,
                                  double down,
                                  double up) {
-    if (ds_pref_bool(preferences, HUDUserDefaultsKeyDisplayMode)) {
+    HUDDisplayMode displayMode = (HUDDisplayMode)[preferences[HUDUserDefaultsKeyDisplayMode] integerValue];
+    if (displayMode == HUDDisplayModeTime) {
+        // 系统短时间格式只包含时、分，并跟随用户的 12/24 小时制和时区。
+        return [NSDateFormatter localizedStringFromDate:NSDate.date
+                                             dateStyle:NSDateFormatterNoStyle
+                                             timeStyle:NSDateFormatterShortStyle];
+    }
+    if (displayMode == HUDDisplayModeFPS) {
         CFIndex current = CARenderServerGetDirtyFrameCount(NULL);
         if (g_needsFPSBaselineReset) {
             g_previousDirtyFrameCount = current;
@@ -696,13 +703,16 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     presentation.centered =
         mode == HUDPresetPositionTopCenter || mode == HUDPresetPositionTopCenterMost;
     presentation.centeredMost = mode == HUDPresetPositionTopCenterMost;
+    BOOL topMost = presentation.centeredMost || mode == HUDPresetPositionTopLeftMost ||
+                   mode == HUDPresetPositionTopRightMost;
     presentation.singleLine = ds_pref_bool(preferences, HUDUserDefaultsKeySingleLineMode);
     presentation.bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
     presentation.arrowPrefixes = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesArrowPrefixes);
     presentation.inverted = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesInvertedColor);
     presentation.followsRotation = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesRotation);
     presentation.hideAtSnapshot = ds_pref_bool(preferences, HUDUserDefaultsKeyHideAtSnapshot);
-    presentation.displayFPS = ds_pref_bool(preferences, HUDUserDefaultsKeyDisplayMode);
+    HUDDisplayMode displayMode = (HUDDisplayMode)[preferences[HUDUserDefaultsKeyDisplayMode] integerValue];
+    presentation.displayFPS = displayMode == HUDDisplayModeFPS;
     presentation.passthrough = ds_pref_bool(preferences, HUDUserDefaultsKeyPassthroughMode);
 
     BOOL customFont = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesCustomFontSize);
@@ -716,7 +726,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
         presentation.cornerRadius = large ? kDSHUDMaxCornerRadius : kDSHUDMinCornerRadius;
     }
     presentation.inactiveOpacity = presentation.inverted ? 1.0 : kDSHUDInactiveOpacity;
-    presentation.numberOfLines = presentation.centered || presentation.singleLine ? 1 : 2;
+    presentation.numberOfLines = displayMode != HUDDisplayModeSpeed || presentation.centered || presentation.singleLine ? 1 : 2;
     presentation.alignment = presentation.centered ? NSTextAlignmentCenter : NSTextAlignmentLeft;
     presentation.maskedCorners =
         presentation.centeredMost && !presentation.landscape
@@ -746,14 +756,16 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     }
 
     CGFloat x = CGRectGetMidX(screenBounds) - hudSize.width / 2.0;
-    if (mode == HUDPresetPositionTopLeft) {
-        x = CGRectGetMinX(screenBounds) + safeInsets.left + 10.0 + realOffsetX;
-    } else if (mode == HUDPresetPositionTopRight) {
-        x = CGRectGetMaxX(screenBounds) - safeInsets.right - 10.0 - hudSize.width + realOffsetX;
+    // 顶部两侧内缩一个顶部安全区的距离，为屏幕圆角留出空间。
+    CGFloat sidePadding = topMost && !presentation.landscape ? MAX(10.0, safeInsets.top) : 10.0;
+    if (mode == HUDPresetPositionTopLeft || mode == HUDPresetPositionTopLeftMost) {
+        x = CGRectGetMinX(screenBounds) + safeInsets.left + sidePadding + realOffsetX;
+    } else if (mode == HUDPresetPositionTopRight || mode == HUDPresetPositionTopRightMost) {
+        x = CGRectGetMaxX(screenBounds) - safeInsets.right - sidePadding - hudSize.width + realOffsetX;
     }
 
     CGFloat y;
-    if (presentation.centeredMost && !presentation.landscape) {
+    if (topMost && !presentation.landscape) {
         y = CGRectGetMinY(screenBounds);
     } else if (presentation.landscape) {
         CGFloat minimumTop = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad

@@ -214,3 +214,4 @@
 "SpringBoard HUD started" = "SpringBoard HUD 已启动";
 "DarkSpeed is not enabled in this build." = "当前构建未启用 DarkSpeed 运行时。";
 "Waiting to start" = "等待启动";
+"Time" = "时间";
