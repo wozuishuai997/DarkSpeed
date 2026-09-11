@@ -203,3 +203,4 @@
 "DarkSpeed is not enabled in this build." = "El entorno de DarkSpeed no está activado en esta compilación.";
 "Waiting to start" = "Esperando para iniciar";
 "Time" = "Hora";
+"Time (Seconds)" = "Hora (segundos)";

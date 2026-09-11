@@ -138,6 +138,7 @@ static uint64_t g_remoteSecureField = 0;
 static uint64_t g_remoteSecureCanvas = 0;
 static uint64_t g_remoteWindow = 0;
 static uint64_t g_remoteWindowScene = 0;
+static uint64_t g_remoteOrientationObserver = 0;
 static pid_t g_remoteWindowPid = 0;
 static dispatch_source_t g_rateTimer = nil;
 static AVAudioPlayer *g_keepAlivePlayer = nil;
@@ -652,11 +653,12 @@ static NSString *ds_display_text(NSDictionary *preferences,
                                  double down,
                                  double up) {
     HUDDisplayMode displayMode = (HUDDisplayMode)[preferences[HUDUserDefaultsKeyDisplayMode] integerValue];
-    if (displayMode == HUDDisplayModeTime) {
-        // 系统短时间格式只包含时、分，并跟随用户的 12/24 小时制和时区。
+    if (displayMode == HUDDisplayModeTime || displayMode == HUDDisplayModeTimeSeconds) {
+        // 系统短/中时间格式分别显示时分/时分秒，并跟随用户的 12/24 小时制和时区。
         return [NSDateFormatter localizedStringFromDate:NSDate.date
                                              dateStyle:NSDateFormatterNoStyle
-                                             timeStyle:NSDateFormatterShortStyle];
+                                             timeStyle:(displayMode == HUDDisplayModeTimeSeconds
+                                                 ? NSDateFormatterMediumStyle : NSDateFormatterShortStyle)];
     }
     if (displayMode == HUDDisplayModeFPS) {
         CFIndex current = CARenderServerGetDirtyFrameCount(NULL);
@@ -1209,6 +1211,14 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_u64_on_main(process, window, "setHidden:", 0);
 
     g_remoteWindowScene = scene;
+    // 桌面窗口可能一直保持竖屏，改用原 HUD 已使用的系统界面方向观察器。
+    // 在 SpringBoard 内查询，避免后台 App 自身的 scene 方向滞后。
+    uint64_t observerClass = ds_remote_class(process, "FBSOrientationObserver");
+    if (observerClass) {
+        uint64_t observer = remote_msg(process, observerClass, alloc, 0, 0, 0, 0);
+        g_remoteOrientationObserver = observer
+            ? ds_remote_get_object_on_main(process, observer, "init") : 0;
+    }
     g_remoteWindowPid = process.pid;
     g_remoteBlurView = blurView;
     g_remoteBlurEffect = 0;
@@ -1229,6 +1239,11 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
 // leak the tiny view hierarchy for the lifetime of the remote session.
 static void ds_remove_springboard_hud(RemoteCall *process) {
     if (!g_remoteWindow || g_remoteWindowPid != process.pid) return;
+    if (g_remoteOrientationObserver) {
+        ds_remote_invoke_noarg_on_main(process, g_remoteOrientationObserver, "invalidate");
+        ds_remote_invoke_noarg_on_main(process, g_remoteOrientationObserver, "release");
+        g_remoteOrientationObserver = 0;
+    }
     if (g_remoteContainer) {
         ds_perform_on_springboard_main(process, g_remoteContainer,
                                        ds_remote_sel(process, "removeFromSuperview"), 0, YES);
@@ -1341,10 +1356,14 @@ static void ds_update_rate(void) {
     g_previousOutput = output;
     g_previousSampleTime = now;
 
-    if (g_remoteWindowScene) {
-        uint64_t orientation = ds_remote_get_u64_on_main(
-            g_springBoard, g_remoteWindowScene, "interfaceOrientation");
-        if (orientation <= UIInterfaceOrientationLandscapeRight) {
+    if (g_remoteOrientationObserver || g_remoteWindowScene) {
+        uint64_t orientation = g_remoteOrientationObserver
+            ? ds_remote_get_u64_on_main(g_springBoard, g_remoteOrientationObserver, "activeInterfaceOrientation")
+            : UIInterfaceOrientationUnknown;
+        if (orientation < UIInterfaceOrientationPortrait || orientation > UIInterfaceOrientationLandscapeRight) {
+            orientation = ds_remote_get_u64_on_main(g_springBoard, g_remoteWindowScene, "interfaceOrientation");
+        }
+        if (orientation >= UIInterfaceOrientationPortrait && orientation <= UIInterfaceOrientationLandscapeRight) {
             g_remoteOrientation.store((int)orientation);
         }
     }
@@ -1453,7 +1472,7 @@ static void ds_register_hud_notifications(void) {
             g_needsFPSBaselineReset = YES;
             g_focusUntil = CFAbsoluteTimeGetCurrent() + kDSHUDFocusDuration;
         }
-        g_lastWindowHidden = YES;
+        g_lastWindowHidden = ds_remote_get_u64_on_main(g_springBoard, g_remoteWindow, "isHidden") != 0;
         ds_update_rate();
     });
 }
@@ -1562,6 +1581,7 @@ static void ds_finish_disable(void) {
     g_remoteSecureCanvas = 0;
     g_remoteWindow = 0;
     g_remoteWindowScene = 0;
+    g_remoteOrientationObserver = 0;
     g_remoteWindowPid = 0;
     g_remoteOrientation.store(UIInterfaceOrientationUnknown);
     g_lastPresentationSignature = 0;

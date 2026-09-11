@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, HUDDisplayMode) {
     HUDDisplayModeSpeed = 0,
     HUDDisplayModeFPS NS_SWIFT_NAME(fps) = 1,
     HUDDisplayModeTime = 2,
+    HUDDisplayModeTimeSeconds = 3,
 };
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeySelectedMode = @"selectedMode";

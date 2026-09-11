@@ -628,7 +628,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 - (void)settingDidSelectWithKey:(NSString * _Nonnull)key
 {
     if ([key isEqualToString:HUDUserDefaultsKeyDisplayMode]) {
-        [self setDisplayMode:(HUDDisplayMode)(([self displayMode] + 1) % 3)];
+        [self setDisplayMode:(HUDDisplayMode)(([self displayMode] + 1) % 4)];
         return;
     }
     BOOL highlighted = [self settingHighlightedWithKey:key];

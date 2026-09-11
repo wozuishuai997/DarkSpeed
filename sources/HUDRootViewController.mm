@@ -799,11 +799,12 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 {
     log_debug(OS_LOG_DEFAULT, "updateSpeedLabel");
     NSAttributedString *attributedText;
-    if (HUD_DISPLAY_MODE == HUDDisplayModeTime) {
-        // 与 SpringBoard 渲染器一致，使用系统的时分格式。
+    if (HUD_DISPLAY_MODE == HUDDisplayModeTime || HUD_DISPLAY_MODE == HUDDisplayModeTimeSeconds) {
+        // 与 SpringBoard 渲染器一致，使用系统的时分或时分秒格式。
         NSString *time = [NSDateFormatter localizedStringFromDate:NSDate.date
                                                       dateStyle:NSDateFormatterNoStyle
-                                                      timeStyle:NSDateFormatterShortStyle];
+                                                      timeStyle:(HUD_DISPLAY_MODE == HUDDisplayModeTimeSeconds
+                                                          ? NSDateFormatterMediumStyle : NSDateFormatterShortStyle)];
         attributedText = [[NSAttributedString alloc] initWithString:time attributes:@{
             NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT]
         }];

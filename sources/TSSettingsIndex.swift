@@ -73,6 +73,8 @@ enum TSSettingsIndex: Int, CaseIterable {
         switch self {
         case .displayMode:
             switch displayMode {
+            case .timeSeconds:
+                return NSLocalizedString("Time (Seconds)", comment: "TSSettingsIndex")
             case .time:
                 return NSLocalizedString("Time", comment: "TSSettingsIndex")
             case .fps:
