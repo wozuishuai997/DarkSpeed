@@ -128,7 +128,7 @@ enum TSSettingsIndex: Int, CaseIterable {
         case .refreshInterval:
             return String(format: NSLocalizedString("Every %g seconds", comment: "TSSettingsIndex"), refreshInterval)
         case .transparentBackground:
-            return highlighted ? NSLocalizedString("Transparent", comment: "TSSettingsIndex") : NSLocalizedString("Original", comment: "TSSettingsIndex")
+            return highlighted ? NSLocalizedString(DSBridgeCompiledIn() ? "Transparent (System)" : "Transparent", comment: "TSSettingsIndex") : NSLocalizedString("Original", comment: "TSSettingsIndex")
         }
     }
 }

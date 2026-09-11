@@ -232,3 +232,4 @@
 "−100 to +100. Negative moves left; positive moves right." = "范围 −100 到 +100。负数向左，正数向右。";
 "Controls automatic updates. Settings and lock changes still update immediately." = "控制自动刷新间隔；修改设置或锁屏状态变化时仍会立即更新。";
 "Apply" = "应用";
+"Transparent (System)" = "透明（跟随系统）";

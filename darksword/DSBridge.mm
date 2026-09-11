@@ -161,6 +161,7 @@ static BOOL g_lastWindowHidden = NO;
 static CGFloat g_lastContainerAlpha = -1.0;
 static CGFloat g_lastFontSize = -1.0;
 static BOOL g_lastInverted = NO;
+static BOOL g_lastDarkText = NO;
 static BOOL g_lastBold = NO;
 static BOOL g_lastHideAtSnapshot = NO;
 static NSMutableDictionary<NSString *, NSNumber *> *g_remoteSelectorCache = nil;
@@ -188,6 +189,7 @@ typedef struct {
     BOOL inverted;
     BOOL bold;
     BOOL transparentBackground;
+    BOOL darkText;
     BOOL followsRotation;
     BOOL hideAtSnapshot;
     BOOL displayFPS;
@@ -723,6 +725,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     presentation.inverted = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesInvertedColor);
     presentation.bold = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBoldFont);
     presentation.transparentBackground = ds_pref_bool(preferences, HUDUserDefaultsKeyTransparentBackground);
+    presentation.darkText = presentation.inverted;
     presentation.followsRotation = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesRotation);
     presentation.hideAtSnapshot = ds_pref_bool(preferences, HUDUserDefaultsKeyHideAtSnapshot);
     HUDDisplayMode displayMode = (HUDDisplayMode)[preferences[HUDUserDefaultsKeyDisplayMode] integerValue];
@@ -1102,6 +1105,45 @@ static uint64_t ds_remote_stroke_attributes(RemoteCall *process, uint64_t stroke
     return attributes;
 }
 
+// 跟随内置屏幕右侧状态栏（Wi-Fi／电池）的有效样式，而非 DarkSpeed 的外观。
+// 读取路径核对自 iOS 18.2 的 SBWindowSceneStatusBarManager；不支持时保留原颜色。
+static BOOL ds_status_bar_uses_dark_text(RemoteCall *process, BOOL fallback) {
+    uint64_t managerClass = ds_remote_class(process, "SBWindowSceneStatusBarManager");
+    uint64_t manager = managerClass ? ds_remote_get_object_on_main(
+        process, managerClass, "windowSceneStatusBarManagerForEmbeddedDisplay") : 0;
+    uint64_t request = manager ? ds_remote_get_retained_object_on_main(
+        process, manager, "trailingStatusBarStyleRequest", NULL, 0) : 0;
+    if (!request) return fallback;
+    @try {
+        uint64_t color = ds_remote_get_object_on_main(process, request, "foregroundColor");
+        if (color && process.trojanMem) {
+            // 系统壁纸可通过前景色覆盖 style，优先读取实际灰度。
+            uint64_t whitePointer = process.trojanMem + kDSRemoteTextScratchOffset;
+            uint64_t alphaPointer = whitePointer + sizeof(CGFloat);
+            DSRemoteArgument arguments[] = {
+                { &whitePointer, sizeof(whitePointer) },
+                { &alphaPointer, sizeof(alphaPointer) },
+            };
+            BOOL converted = NO;
+            CGFloat white = 0;
+            if (ds_remote_invoke_on_main_result(process, color, ds_remote_sel(process, "getWhite:alpha:"),
+                                                arguments, 2, &converted, sizeof(converted)) && converted &&
+                [process remoteRead:whitePointer to:&white size:sizeof(white)]) {
+                return white < 0.5;
+            }
+        }
+        NSInteger style = -1;
+        if (ds_remote_invoke_on_main_result(process, request, ds_remote_sel(process, "style"),
+                                            NULL, 0, &style, sizeof(style))) {
+            if (style == UIStatusBarStyleLightContent) return NO;
+            if (style == UIStatusBarStyleDefault || style == UIStatusBarStyleDarkContent) return YES;
+        }
+        return fallback;
+    } @finally {
+        if (process.trojanMem) remote_msg(process, request, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+    }
+}
+
 static uint64_t ds_remote_secure_canvas(RemoteCall *process, uint64_t textField) {
     uint64_t canvasClass = ds_remote_class(process, "_UITextLayoutCanvasView");
     uint64_t subviews = ds_remote_get_retained_object_on_main(
@@ -1151,6 +1193,9 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     DSHUDPresentation probe = ds_hud_presentation(preferences, @"0");
     NSString *text = ds_display_text(preferences, probe.centered, YES, 0, 0);
     DSHUDPresentation presentation = ds_hud_presentation(preferences, text);
+    if (presentation.transparentBackground) {
+        presentation.darkText = ds_status_bar_uses_dark_text(process, presentation.inverted);
+    }
 
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t workspaceClass = ds_remote_class(process, "SBMainWorkspace");
@@ -1231,7 +1276,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_u64_on_main(process, secureField, "setOpaque:", 0);
     ds_perform_on_springboard_main(process, label,
                                    ds_remote_sel(process, "setTextColor:"),
-                                   presentation.inverted ? black : white, YES);
+                                   presentation.darkText ? black : white, YES);
     ds_remote_set_u64_on_main(process, label, "setNumberOfLines:",
                               (uint64_t)presentation.numberOfLines);
     ds_remote_set_u64_on_main(process, label, "setHidden:", 0);
@@ -1258,8 +1303,8 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
 
     if (!process.trojanMem) return 0;
     g_remoteTextAttributes = presentation.transparentBackground
-        ? ds_remote_stroke_attributes(process, presentation.inverted ? white : black, font,
-                                      presentation.inverted ? black : white, presentation.bold) : 0;
+        ? ds_remote_stroke_attributes(process, presentation.darkText ? white : black, font,
+                                      presentation.darkText ? black : white, presentation.bold) : 0;
     if (presentation.transparentBackground && !g_remoteTextAttributes) return 0;
     if (!ds_remote_set_text_on_main(process, label, text, g_remoteTextAttributes)) return 0;
     ds_perform_on_springboard_main(process, blurView,
@@ -1296,6 +1341,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     g_lastContainerAlpha = 1.0;
     g_lastFontSize = presentation.fontSize;
     g_lastInverted = presentation.inverted;
+    g_lastDarkText = presentation.darkText;
     g_lastBold = presentation.bold;
     g_focusUntil = CFAbsoluteTimeGetCurrent() + kDSHUDFocusDuration;
     return label;
@@ -1370,7 +1416,7 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
             ? ds_remote_get_object_on_main(process, colorClass, "blackColor") : 0;
         uint64_t darkGray = colorClass
             ? ds_remote_get_object_on_main(process, colorClass, "darkGrayColor") : 0;
-        uint64_t textColor = presentation->inverted ? black : white;
+        uint64_t textColor = presentation->darkText ? black : white;
         uint64_t backgroundColor = presentation->inverted ? white : darkGray;
         if (presentation->transparentBackground) {
             backgroundColor = ds_remote_get_object_on_main(process, colorClass, "clearColor");
@@ -1397,7 +1443,7 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
         ds_remote_set_double_on_main(process, g_remoteLabel, "setAlpha:", presentation->transparentBackground ? 1.0 : 0.85);
         uint64_t attributes = presentation->transparentBackground
-            ? ds_remote_stroke_attributes(process, presentation->inverted ? white : black,
+            ? ds_remote_stroke_attributes(process, presentation->darkText ? white : black,
                                           ds_remote_get_object_on_main(process, g_remoteLabel, "font"),
                                           textColor, presentation->bold) : 0;
         if (presentation->transparentBackground && !attributes) return NO;
@@ -1473,12 +1519,17 @@ static void ds_update_rate(void) {
                       orientation != g_lastPresentationOrientation;
 
     @try {
+        if (presentation.transparentBackground) {
+            presentation.darkText = ds_status_bar_uses_dark_text(g_springBoard, g_lastDarkText);
+        }
+        applyStyle = applyStyle || presentation.darkText != g_lastDarkText;
         if (!ds_apply_remote_presentation(
                 g_springBoard, &presentation, text, focused, applyStyle)) {
             @throw [NSException exceptionWithName:@"DSRemoteHUDUpdate"
                                            reason:@"remote presentation update failed"
                                          userInfo:nil];
         }
+        g_lastDarkText = presentation.darkText;
         g_lastPresentationPreferences = [preferences copy];
         g_lastPresentationOrientation = orientation;
     } @catch (NSException *exception) {
@@ -1693,6 +1744,7 @@ static void ds_finish_disable(void) {
     g_lastContainerAlpha = -1.0;
     g_lastFontSize = -1.0;
     g_lastInverted = NO;
+    g_lastDarkText = NO;
     g_lastBold = NO;
     g_lastHideAtSnapshot = NO;
     ds_reset_remote_symbol_cache();
