@@ -210,3 +210,6 @@
 "Background" = "Fondo";
 "Transparent" = "Transparente";
 "Original" = "Original";
+"Font Size" = "Tamaño de letra";
+"%g pt" = "%g pt";
+"Cancel" = "Cancelar";

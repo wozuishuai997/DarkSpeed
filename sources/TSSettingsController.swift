@@ -9,6 +9,8 @@ import UIKit
 
 @objc public protocol TSSettingsControllerDelegate {
     func displayMode() -> HUDDisplayMode
+    func hudFontSize() -> Double
+    func setHUDFontSize(_ size: Double)
     func settingHighlighted(key: String) -> Bool
     func settingDidSelect(key: String) -> Void
 }
@@ -28,7 +30,7 @@ import UIKit
     }
 
     open override func settingSubtitle(index: Int, highlighted: Bool) -> String? {
-        return TSSettingsIndex.allCases[index].subtitle(highlighted: highlighted, restartRequired: restartRequired, displayMode: delegate?.displayMode() ?? .speed)
+        return TSSettingsIndex.allCases[index].subtitle(highlighted: highlighted, restartRequired: restartRequired, displayMode: delegate?.displayMode() ?? .speed, fontSize: delegate?.hudFontSize() ?? 9)
     }
 
     private func settingKey(index: Int) -> String {
@@ -65,6 +67,26 @@ import UIKit
     }
 
     open override func settingDidSelect(index: Int, completion: @escaping () -> ()) {
+        if index == TSSettingsIndex.usesLargeFont.rawValue {
+            let currentSize = delegate?.hudFontSize() ?? 9
+            let picker = UIAlertController(title: NSLocalizedString("Font Size", comment: ""),
+                                          message: nil, preferredStyle: .actionSheet)
+            for size in 8...24 {
+                let label = String(format: NSLocalizedString("%g pt", comment: ""), Double(size))
+                let title = abs(currentSize - Double(size)) < 0.01 ? "✓ " + label : label
+                picker.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                    self?.delegate?.setHUDFontSize(Double(size))
+                    completion()
+                })
+            }
+            picker.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
+            if let popover = picker.popoverPresentationController {
+                popover.sourceView = collectionView
+                popover.sourceRect = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame ?? collectionView.bounds
+            }
+            present(picker, animated: true)
+            return
+        }
         if index == TSSettingsIndex.passthroughMode.rawValue && alreadyLaunched && !DSBridgeCompiledIn() {
             restartRequired = true
         }

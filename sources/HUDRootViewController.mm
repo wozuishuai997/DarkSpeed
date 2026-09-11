@@ -592,7 +592,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
         HUD_FONT_SIZE = (usesLargeFont ? HUD_MAX_FONT_SIZE : HUD_MIN_FONT_SIZE);
         [_blurView.layer setCornerRadius:(usesLargeFont ? HUD_MAX_CORNER_RADIUS : HUD_MIN_CORNER_RADIUS)];
     } else {
-        CGFloat realCustomFontSize = MIN(MAX([self realCustomFontSize], 8), 12);
+        CGFloat realCustomFontSize = MIN(MAX([self realCustomFontSize], 8), 24);
         HUD_FONT_SIZE = realCustomFontSize;
         [_blurView.layer setCornerRadius:realCustomFontSize / 2.0];
     }
@@ -600,7 +600,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     BOOL usesInvertedColor = [self usesInvertedColor];
     BOOL usesBoldFont = [_userDefaults[HUDUserDefaultsKeyUsesBoldFont] boolValue];
     HUD_TRANSPARENT_BACKGROUND = [_userDefaults[HUDUserDefaultsKeyTransparentBackground] boolValue];
-    HUD_FONT_WEIGHT = usesBoldFont ? UIFontWeightBold : (usesInvertedColor ? UIFontWeightMedium : UIFontWeightRegular);
+    HUD_FONT_WEIGHT = usesBoldFont ? UIFontWeightBlack : (usesInvertedColor ? UIFontWeightMedium : UIFontWeightRegular);
     HUD_INACTIVE_OPACITY = (usesInvertedColor || HUD_TRANSPARENT_BACKGROUND ? 1.0 : 0.667);
     [_blurView setEffect:(usesInvertedColor || HUD_TRANSPARENT_BACKGROUND ? nil : _blurEffect)];
     [_speedLabel setColorInvertEnabled:(usesInvertedColor && !HUD_TRANSPARENT_BACKGROUND)];
@@ -829,7 +829,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
             [outlinedText addAttributes:@{
                 NSForegroundColorAttributeName: inverted ? UIColor.blackColor : UIColor.whiteColor,
                 NSStrokeColorAttributeName: inverted ? UIColor.whiteColor : UIColor.blackColor,
-                NSStrokeWidthAttributeName: @(HUDTextOutlineStrokeWidth(HUD_FONT_WEIGHT == UIFontWeightBold))
+                NSStrokeWidthAttributeName: @(HUDTextOutlineStrokeWidth(HUD_FONT_WEIGHT == UIFontWeightBlack))
             } range:NSMakeRange(0, outlinedText.length)];
             attributedText = outlinedText;
         }

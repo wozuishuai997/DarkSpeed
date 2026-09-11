@@ -67,7 +67,7 @@ enum TSSettingsIndex: Int, CaseIterable {
         case .usesRotation:
             return NSLocalizedString("Landscape", comment: "TSSettingsIndex")
         case .usesLargeFont:
-            return NSLocalizedString("Size", comment: "TSSettingsIndex")
+            return NSLocalizedString("Font Size", comment: "TSSettingsIndex")
         case .usesArrowPrefixes:
             return NSLocalizedString("Prefixes", comment: "TSSettingsIndex")
         case .usesBitrate:
@@ -79,7 +79,7 @@ enum TSSettingsIndex: Int, CaseIterable {
         }
     }
 
-    func subtitle(highlighted: Bool, restartRequired: Bool, displayMode: HUDDisplayMode) -> String {
+    func subtitle(highlighted: Bool, restartRequired: Bool, displayMode: HUDDisplayMode, fontSize: Double) -> String {
         switch self {
         case .displayMode:
             switch displayMode {
@@ -108,7 +108,7 @@ enum TSSettingsIndex: Int, CaseIterable {
         case .usesRotation:
             return highlighted ? NSLocalizedString("Follow", comment: "TSSettingsIndex") : NSLocalizedString("Hide", comment: "TSSettingsIndex")
         case .usesLargeFont:
-            return highlighted ? NSLocalizedString("Large", comment: "TSSettingsIndex") : NSLocalizedString("Standard", comment: "TSSettingsIndex")
+            return String(format: NSLocalizedString("%g pt", comment: "TSSettingsIndex"), fontSize)
         case .usesArrowPrefixes:
             return highlighted ? NSLocalizedString("↑↓", comment: "TSSettingsIndex") : NSLocalizedString("▲▼", comment: "TSSettingsIndex")
         case .usesBitrate:

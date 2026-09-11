@@ -152,7 +152,8 @@ static BOOL g_needsFPSBaselineReset = YES;
 static std::atomic<int> g_remoteOrientation(UIInterfaceOrientationUnknown);
 static int g_reloadHUDToken = -1;
 static int g_lockStateToken = -1;
-static NSUInteger g_lastPresentationSignature = 0;
+static NSDictionary *g_lastPresentationPreferences = nil;
+static UIInterfaceOrientation g_lastPresentationOrientation = UIInterfaceOrientationUnknown;
 static CGRect g_lastWindowFrame = CGRectNull;
 static CGRect g_lastLabelFrame = CGRectNull;
 static BOOL g_lastWindowHidden = NO;
@@ -459,7 +460,7 @@ static NSDictionary *ds_hud_preferences(void) {
     // The original app keeps the advanced font/offset values in its standard
     // defaults rather than the HUD plist. Merge them into the remote snapshot
     // so the renderer has exactly one source of truth.
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSUserDefaults *defaults = GetStandardUserDefaults();
     for (HUDUserDefaultsKey key in @[
         HUDUserDefaultsKeyUsesCustomFontSize,
         HUDUserDefaultsKeyRealCustomFontSize,
@@ -726,7 +727,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     BOOL customFont = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesCustomFontSize);
     if (customFont) {
         presentation.fontSize = MIN(MAX(ds_pref_double(
-            preferences, HUDUserDefaultsKeyRealCustomFontSize, kDSHUDMinFontSize), 8.0), 12.0);
+            preferences, HUDUserDefaultsKeyRealCustomFontSize, kDSHUDMinFontSize), 8.0), 24.0);
         presentation.cornerRadius = presentation.fontSize / 2.0;
     } else {
         BOOL large = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesLargeFont);
@@ -741,7 +742,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
             ? kDSCornerMaskBottom
             : kDSCornerMaskAll;
 
-    UIFontWeight weight = presentation.bold ? UIFontWeightBold : (presentation.inverted ? UIFontWeightMedium : UIFontWeightRegular);
+    UIFontWeight weight = presentation.bold ? UIFontWeightBlack : (presentation.inverted ? UIFontWeightMedium : UIFontWeightRegular);
     UIFont *font = [UIFont monospacedDigitSystemFontOfSize:presentation.fontSize weight:weight];
     CGRect measured = [text boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
                                         options:NSStringDrawingUsesLineFragmentOrigin |
@@ -1051,7 +1052,7 @@ static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium, B
     uint64_t fontClass = ds_remote_class(process, "UIFont");
     if (!fontClass) return 0;
     double pointSize = size;
-    double weight = bold ? UIFontWeightBold : (medium ? UIFontWeightMedium : UIFontWeightRegular);
+    double weight = bold ? UIFontWeightBlack : (medium ? UIFontWeightMedium : UIFontWeightRegular);
     DSRemoteArgument arguments[] = {
         { &pointSize, sizeof(pointSize) },
         { &weight, sizeof(weight) },
@@ -1061,32 +1062,34 @@ static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium, B
         arguments, 2);
 }
 
-static uint64_t ds_remote_stroke_attributes(RemoteCall *process, uint64_t strokeColor, BOOL bold) {
+static uint64_t ds_remote_stroke_attributes(RemoteCall *process, uint64_t strokeColor, uint64_t font, uint64_t textColor, BOOL bold) {
     uint64_t dictionaryClass = ds_remote_class(process, "NSDictionary");
     uint64_t numberClass = ds_remote_class(process, "NSNumber");
-    if (!dictionaryClass || !numberClass || !strokeColor) return 0;
+    if (!dictionaryClass || !numberClass || !strokeColor || !font || !textColor) return 0;
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t widthObject = remote_msg(process, numberClass, alloc, 0, 0, 0, 0);
     uint64_t width = widthObject ? remote_msg(process, widthObject, ds_remote_sel(process, "initWithInt:"),
                                               (uint64_t)(int64_t)HUDTextOutlineStrokeWidth(bold), 0, 0, 0) : 0;
     uint64_t keys[] = {
         ds_remote_create_string(process, NSStrokeWidthAttributeName),
-        ds_remote_create_string(process, NSStrokeColorAttributeName)
+        ds_remote_create_string(process, NSStrokeColorAttributeName),
+        ds_remote_create_string(process, NSFontAttributeName),
+        ds_remote_create_string(process, NSForegroundColorAttributeName)
     };
-    uint64_t values[] = { width, strokeColor };
+    uint64_t values[] = { width, strokeColor, font, textColor };
     uint64_t attributes = 0;
     // 字符串已复制内容，可复用文字暂存区传递数组；字典复制键并持有值。
     // 描边属性只在样式变化时重建，避免每秒创建一套远端样式对象。
     uint64_t scratch = process.trojanMem + kDSRemoteTextScratchOffset;
-    if (width && keys[0] && keys[1] && process.trojanMem &&
+    if (width && keys[0] && keys[1] && keys[2] && keys[3] && process.trojanMem &&
         [process remote_write:scratch from:values size:sizeof(values)] &&
         [process remote_write:scratch + sizeof(values) from:keys size:sizeof(keys)]) {
         uint64_t object = remote_msg(process, dictionaryClass, alloc, 0, 0, 0, 0);
         if (object) attributes = remote_msg(process, object, ds_remote_sel(process, "initWithObjects:forKeys:count:"),
-                                             scratch, scratch + sizeof(values), 2, 0);
+                                             scratch, scratch + sizeof(values), 4, 0);
     }
     uint64_t release = ds_remote_sel(process, "release");
-    for (uint64_t object : { width, keys[0], keys[1] }) {
+    for (uint64_t object : { width, keys[0], keys[1], keys[2], keys[3] }) {
         if (object && release && process.trojanMem) remote_msg(process, object, release, 0, 0, 0, 0);
     }
     return attributes;
@@ -1248,7 +1251,8 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
 
     if (!process.trojanMem) return 0;
     g_remoteTextAttributes = presentation.transparentBackground
-        ? ds_remote_stroke_attributes(process, presentation.inverted ? white : black, presentation.bold) : 0;
+        ? ds_remote_stroke_attributes(process, presentation.inverted ? white : black, font,
+                                      presentation.inverted ? black : white, presentation.bold) : 0;
     if (presentation.transparentBackground && !g_remoteTextAttributes) return 0;
     if (!ds_remote_set_text_on_main(process, label, text, g_remoteTextAttributes)) return 0;
     ds_perform_on_springboard_main(process, blurView,
@@ -1277,8 +1281,8 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     g_remoteWindowPid = process.pid;
     g_remoteBlurView = blurView;
     g_remoteBlurEffect = 0;
-    g_lastPresentationSignature = preferences.description.hash ^
-                                  (NSUInteger)ds_interface_orientation();
+    g_lastPresentationPreferences = [preferences copy];
+    g_lastPresentationOrientation = ds_interface_orientation();
     g_lastWindowFrame = presentation.windowFrame;
     g_lastLabelFrame = presentation.labelFrame;
     g_lastWindowHidden = NO;
@@ -1372,20 +1376,6 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
                                            backgroundColor, YES);
         }
 
-        ds_remote_set_double_on_main(process, g_remoteLabel, "setAlpha:", presentation->transparentBackground ? 1.0 : 0.85);
-        uint64_t attributes = presentation->transparentBackground
-            ? ds_remote_stroke_attributes(process, presentation->inverted ? white : black, presentation->bold) : 0;
-        if (presentation->transparentBackground && !attributes) return NO;
-        if (g_remoteTextAttributes) {
-            remote_msg(process, g_remoteTextAttributes, ds_remote_sel(process, "release"), 0, 0, 0, 0);
-        }
-        g_remoteTextAttributes = attributes;
-        if (!presentation->transparentBackground) {
-            // 切回原样时清空 attributedText，防止 UILabel 沿用旧描边。
-            ds_perform_on_springboard_main(process, g_remoteLabel,
-                                           ds_remote_sel(process, "setAttributedText:"), 0, YES);
-        }
-
         if (fabs(g_lastFontSize - presentation->fontSize) > 0.001 ||
             g_lastInverted != presentation->inverted || g_lastBold != presentation->bold) {
             uint64_t font = ds_remote_font(process, presentation->fontSize,
@@ -1396,6 +1386,22 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
             g_lastFontSize = presentation->fontSize;
             g_lastInverted = presentation->inverted;
             g_lastBold = presentation->bold;
+        }
+
+        ds_remote_set_double_on_main(process, g_remoteLabel, "setAlpha:", presentation->transparentBackground ? 1.0 : 0.85);
+        uint64_t attributes = presentation->transparentBackground
+            ? ds_remote_stroke_attributes(process, presentation->inverted ? white : black,
+                                          ds_remote_get_object_on_main(process, g_remoteLabel, "font"),
+                                          textColor, presentation->bold) : 0;
+        if (presentation->transparentBackground && !attributes) return NO;
+        if (g_remoteTextAttributes) {
+            remote_msg(process, g_remoteTextAttributes, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+        }
+        g_remoteTextAttributes = attributes;
+        if (!presentation->transparentBackground) {
+            // 切回原样时清空 attributedText，防止 UILabel 沿用旧描边。
+            ds_perform_on_springboard_main(process, g_remoteLabel,
+                                           ds_remote_sel(process, "setAttributedText:"), 0, YES);
         }
 
         uint64_t layer = ds_remote_get_object_on_main(process, g_remoteBlurView, "layer");
@@ -1454,9 +1460,10 @@ static void ds_update_rate(void) {
         focused ? (double)input : down,
         focused ? (double)output : up);
     DSHUDPresentation presentation = ds_hud_presentation(preferences, text);
-    NSUInteger presentationSignature = preferences.description.hash ^
-                                       (NSUInteger)ds_interface_orientation();
-    BOOL applyStyle = presentationSignature != g_lastPresentationSignature;
+    // 比较实际设置，避免字符串哈希碰撞导致单次点击不刷新样式。
+    UIInterfaceOrientation orientation = ds_interface_orientation();
+    BOOL applyStyle = ![preferences isEqualToDictionary:g_lastPresentationPreferences] ||
+                      orientation != g_lastPresentationOrientation;
 
     @try {
         if (!ds_apply_remote_presentation(
@@ -1465,7 +1472,8 @@ static void ds_update_rate(void) {
                                            reason:@"remote presentation update failed"
                                          userInfo:nil];
         }
-        g_lastPresentationSignature = presentationSignature;
+        g_lastPresentationPreferences = [preferences copy];
+        g_lastPresentationOrientation = orientation;
     } @catch (NSException *exception) {
         ds_set_error([NSString stringWithFormat:@"SpringBoard HUD update failed: %@", exception.reason]);
         g_hudActive.store(false);
@@ -1663,7 +1671,8 @@ static void ds_finish_disable(void) {
     g_remoteOrientationObserver = 0;
     g_remoteWindowPid = 0;
     g_remoteOrientation.store(UIInterfaceOrientationUnknown);
-    g_lastPresentationSignature = 0;
+    g_lastPresentationPreferences = nil;
+    g_lastPresentationOrientation = UIInterfaceOrientationUnknown;
     g_lastWindowFrame = CGRectNull;
     g_lastLabelFrame = CGRectNull;
     g_lastWindowHidden = NO;

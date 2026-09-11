@@ -618,8 +618,28 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [_authorLabel setText:NSLocalizedString(@"Tap that button on the center again,\nto toggle ON/OFF “Dynamic Island” mode.", nil)];
 }
 
+- (double)hudFontSize
+{
+    NSUserDefaults *defaults = GetStandardUserDefaults();
+    if ([defaults boolForKey:HUDUserDefaultsKeyUsesCustomFontSize]) {
+        return MIN(MAX([defaults doubleForKey:HUDUserDefaultsKeyRealCustomFontSize], 8.0), 24.0);
+    }
+    return [self usesLargeFont] ? 10.0 : 9.0;
+}
+
+- (void)setHUDFontSize:(double)size
+{
+    // 沿用系统设置中的字号存储，先保存字号再通知 HUD 刷新。
+    NSUserDefaults *defaults = GetStandardUserDefaults();
+    [defaults setDouble:MIN(MAX(size, 8.0), 24.0) forKey:HUDUserDefaultsKeyRealCustomFontSize];
+    [defaults setBool:YES forKey:HUDUserDefaultsKeyUsesCustomFontSize];
+    [defaults synchronize];
+    notify_post(NOTIFY_RELOAD_HUD);
+}
+
 - (BOOL)settingHighlightedWithKey:(NSString * _Nonnull)key
 {
+    if ([key isEqualToString:HUDUserDefaultsKeyUsesLargeFont]) return [self hudFontSize] > 9.0;
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:key];
     return mode != nil ? [mode boolValue] : NO;

@@ -42,7 +42,7 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyTransparentBackground = @"tran
 
 // 负值同时绘制填充和描边；按字号百分比缩放，加粗时适当增加边宽。
 static inline int HUDTextOutlineStrokeWidth(BOOL bold) {
-    return bold ? -6 : -4;
+    return bold ? -3 : -2;
 }
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";

@@ -222,3 +222,6 @@
 "Background" = "背景";
 "Transparent" = "透明";
 "Original" = "原样";
+"Font Size" = "字号";
+"%g pt" = "%g 号";
+"Cancel" = "取消";
