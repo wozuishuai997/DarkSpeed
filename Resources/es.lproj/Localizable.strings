@@ -204,3 +204,9 @@
 "Waiting to start" = "Esperando para iniciar";
 "Time" = "Hora";
 "Time (Seconds)" = "Hora (segundos)";
+
+/* HUD appearance */
+"Bold Text" = "Texto en negrita";
+"Background" = "Fondo";
+"Transparent" = "Transparente";
+"Original" = "Original";

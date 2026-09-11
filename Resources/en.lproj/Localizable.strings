@@ -216,3 +216,9 @@
 "Waiting to start" = "Waiting to start";
 "Time" = "Time";
 "Time (Seconds)" = "Time (Seconds)";
+
+/* HUD appearance */
+"Bold Text" = "Bold Text";
+"Background" = "Background";
+"Transparent" = "Transparent";
+"Original" = "Original";

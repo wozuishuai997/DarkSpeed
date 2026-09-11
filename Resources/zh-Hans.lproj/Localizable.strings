@@ -216,3 +216,9 @@
 "Waiting to start" = "等待启动";
 "Time" = "时间";
 "Time (Seconds)" = "时间（秒）";
+
+/* HUD appearance */
+"Bold Text" = "文字加粗";
+"Background" = "背景";
+"Transparent" = "透明";
+"Original" = "原样";

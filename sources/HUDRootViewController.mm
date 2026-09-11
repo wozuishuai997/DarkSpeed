@@ -121,6 +121,7 @@ static const double HUD_MIN_CORNER_RADIUS = 4.5;
 static const double HUD_MAX_CORNER_RADIUS = 5.0;
 static double HUD_FONT_SIZE = 8.0;
 static UIFontWeight HUD_FONT_WEIGHT = UIFontWeightRegular;
+static BOOL HUD_TRANSPARENT_BACKGROUND = NO;
 static CGFloat HUD_INACTIVE_OPACITY = 0.667;
 static uint8_t HUD_DATA_UNIT = 0;
 static uint8_t HUD_SHOW_UPLOAD_SPEED = 1;
@@ -597,11 +598,19 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     }
 
     BOOL usesInvertedColor = [self usesInvertedColor];
-    HUD_FONT_WEIGHT = (usesInvertedColor ? UIFontWeightMedium : UIFontWeightRegular);
-    HUD_INACTIVE_OPACITY = (usesInvertedColor ? 1.0 : 0.667);
-    [_blurView setEffect:(usesInvertedColor ? nil : _blurEffect)];
-    [_speedLabel setColorInvertEnabled:usesInvertedColor];
-    [_lockedView setHidden:usesInvertedColor];
+    BOOL usesBoldFont = [_userDefaults[HUDUserDefaultsKeyUsesBoldFont] boolValue];
+    HUD_TRANSPARENT_BACKGROUND = [_userDefaults[HUDUserDefaultsKeyTransparentBackground] boolValue];
+    HUD_FONT_WEIGHT = usesBoldFont ? UIFontWeightBold : (usesInvertedColor ? UIFontWeightMedium : UIFontWeightRegular);
+    HUD_INACTIVE_OPACITY = (usesInvertedColor || HUD_TRANSPARENT_BACKGROUND ? 1.0 : 0.667);
+    [_blurView setEffect:(usesInvertedColor || HUD_TRANSPARENT_BACKGROUND ? nil : _blurEffect)];
+    [_speedLabel setColorInvertEnabled:(usesInvertedColor && !HUD_TRANSPARENT_BACKGROUND)];
+    if (HUD_TRANSPARENT_BACKGROUND) {
+        _speedLabel.textColor = usesInvertedColor ? UIColor.blackColor : UIColor.whiteColor;
+        _speedLabel.alpha = 1.0;
+    }
+    _speedLabel.outlineInset = HUD_TRANSPARENT_BACKGROUND
+        ? ceil(HUD_FONT_SIZE * -HUDTextOutlineStrokeWidth(usesBoldFont) / 100.0) : 0;
+    [_lockedView setHidden:(usesInvertedColor || HUD_TRANSPARENT_BACKGROUND)];
 
     BOOL hideAtSnapshot = [self hideAtSnapshot];
     if (hideAtSnapshot) {
@@ -814,6 +823,16 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
         attributedText = formattedAttributedString(_isFocused);
     }
     if (attributedText) {
+        if (HUD_TRANSPARENT_BACKGROUND) {
+            NSMutableAttributedString *outlinedText = [attributedText mutableCopy];
+            BOOL inverted = [self usesInvertedColor];
+            [outlinedText addAttributes:@{
+                NSForegroundColorAttributeName: inverted ? UIColor.blackColor : UIColor.whiteColor,
+                NSStrokeColorAttributeName: inverted ? UIColor.whiteColor : UIColor.blackColor,
+                NSStrokeWidthAttributeName: @(HUDTextOutlineStrokeWidth(HUD_FONT_WEIGHT == UIFontWeightBold))
+            } range:NSMakeRange(0, outlinedText.length)];
+            attributedText = outlinedText;
+        }
         [_speedLabel setAttributedText:attributedText];
     }
     [_speedLabel sizeToFit];

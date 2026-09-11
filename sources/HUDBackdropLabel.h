@@ -10,6 +10,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface HUDBackdropLabel : UILabel
+@property (nonatomic) CGFloat outlineInset;
 - (void)setColorInvertEnabled:(BOOL)colorInvertEnabled;
 @end
 

@@ -134,6 +134,7 @@ static uint64_t g_remoteContainer = 0;
 static uint64_t g_remoteBlurView = 0;
 static uint64_t g_remoteBlurEffect = 0;
 static uint64_t g_remoteLabel = 0;
+static uint64_t g_remoteTextAttributes = 0;
 static uint64_t g_remoteSecureField = 0;
 static uint64_t g_remoteSecureCanvas = 0;
 static uint64_t g_remoteWindow = 0;
@@ -158,6 +159,7 @@ static BOOL g_lastWindowHidden = NO;
 static CGFloat g_lastContainerAlpha = -1.0;
 static CGFloat g_lastFontSize = -1.0;
 static BOOL g_lastInverted = NO;
+static BOOL g_lastBold = NO;
 static BOOL g_lastHideAtSnapshot = NO;
 static NSMutableDictionary<NSString *, NSNumber *> *g_remoteSelectorCache = nil;
 static NSMutableDictionary<NSString *, NSNumber *> *g_remoteClassCache = nil;
@@ -182,6 +184,8 @@ typedef struct {
     BOOL bitrate;
     BOOL arrowPrefixes;
     BOOL inverted;
+    BOOL bold;
+    BOOL transparentBackground;
     BOOL followsRotation;
     BOOL hideAtSnapshot;
     BOOL displayFPS;
@@ -711,6 +715,8 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     presentation.bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
     presentation.arrowPrefixes = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesArrowPrefixes);
     presentation.inverted = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesInvertedColor);
+    presentation.bold = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBoldFont);
+    presentation.transparentBackground = ds_pref_bool(preferences, HUDUserDefaultsKeyTransparentBackground);
     presentation.followsRotation = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesRotation);
     presentation.hideAtSnapshot = ds_pref_bool(preferences, HUDUserDefaultsKeyHideAtSnapshot);
     HUDDisplayMode displayMode = (HUDDisplayMode)[preferences[HUDUserDefaultsKeyDisplayMode] integerValue];
@@ -727,7 +733,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
         presentation.fontSize = large ? kDSHUDMaxFontSize : kDSHUDMinFontSize;
         presentation.cornerRadius = large ? kDSHUDMaxCornerRadius : kDSHUDMinCornerRadius;
     }
-    presentation.inactiveOpacity = presentation.inverted ? 1.0 : kDSHUDInactiveOpacity;
+    presentation.inactiveOpacity = presentation.inverted || presentation.transparentBackground ? 1.0 : kDSHUDInactiveOpacity;
     presentation.numberOfLines = displayMode != HUDDisplayModeSpeed || presentation.centered || presentation.singleLine ? 1 : 2;
     presentation.alignment = presentation.centered ? NSTextAlignmentCenter : NSTextAlignmentLeft;
     presentation.maskedCorners =
@@ -735,7 +741,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
             ? kDSCornerMaskBottom
             : kDSCornerMaskAll;
 
-    UIFontWeight weight = presentation.inverted ? UIFontWeightMedium : UIFontWeightRegular;
+    UIFontWeight weight = presentation.bold ? UIFontWeightBold : (presentation.inverted ? UIFontWeightMedium : UIFontWeightRegular);
     UIFont *font = [UIFont monospacedDigitSystemFontOfSize:presentation.fontSize weight:weight];
     CGRect measured = [text boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
                                         options:NSStringDrawingUsesLineFragmentOrigin |
@@ -745,6 +751,12 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     CGSize labelSize = CGSizeMake(ceil(measured.size.width), ceil(measured.size.height));
     if (labelSize.width < 1) labelSize.width = 1;
     if (labelSize.height < 1) labelSize.height = ceil(font.lineHeight);
+    // 为描边留出空间，避免粗体或大字号的边缘被裁切。
+    if (presentation.transparentBackground) {
+        CGFloat inset = ceil(presentation.fontSize * -HUDTextOutlineStrokeWidth(presentation.bold) / 100.0);
+        labelSize.width += inset * 2.0;
+        labelSize.height += inset * 2.0;
+    }
     CGSize hudSize = CGSizeMake(labelSize.width + 8.0, labelSize.height + 4.0);
 
     CGRect screenBounds;
@@ -863,13 +875,22 @@ static BOOL ds_perform_on_springboard_main(RemoteCall *process, uint64_t target,
 }
 
 static BOOL ds_remote_set_text_on_main(RemoteCall *process, uint64_t label,
-                                       NSString *text) {
+                                       NSString *text, uint64_t attributes) {
     uint64_t remoteText = ds_remote_create_string(process, text);
     if (!remoteText) return NO;
-    BOOL sent = ds_perform_on_springboard_main(
-        process, label, ds_remote_sel(process, "setText:"), remoteText, YES);
+    uint64_t value = remoteText;
+    if (attributes) {
+        uint64_t attributedClass = ds_remote_class(process, "NSAttributedString");
+        uint64_t object = attributedClass
+            ? remote_msg(process, attributedClass, ds_remote_sel(process, "alloc"), 0, 0, 0, 0) : 0;
+        value = object ? remote_msg(process, object, ds_remote_sel(process, "initWithString:attributes:"),
+                                    remoteText, attributes, 0, 0) : 0;
+    }
+    BOOL sent = value && ds_perform_on_springboard_main(
+        process, label, ds_remote_sel(process, attributes ? "setAttributedText:" : "setText:"), value, YES);
     uint64_t release = ds_remote_sel(process, "release");
     if (release && process.trojanMem) {
+        if (attributes && value) remote_msg(process, value, release, 0, 0, 0, 0);
         remote_msg(process, remoteText, release, 0, 0, 0, 0);
     }
     return sent;
@@ -1026,11 +1047,11 @@ static BOOL ds_remote_set_rect_on_main(RemoteCall *process, uint64_t target,
                                     &argument, 1);
 }
 
-static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium) {
+static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium, BOOL bold) {
     uint64_t fontClass = ds_remote_class(process, "UIFont");
     if (!fontClass) return 0;
     double pointSize = size;
-    double weight = medium ? UIFontWeightMedium : UIFontWeightRegular;
+    double weight = bold ? UIFontWeightBold : (medium ? UIFontWeightMedium : UIFontWeightRegular);
     DSRemoteArgument arguments[] = {
         { &pointSize, sizeof(pointSize) },
         { &weight, sizeof(weight) },
@@ -1038,6 +1059,37 @@ static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium) {
     return ds_remote_get_retained_object_on_main(
         process, fontClass, "monospacedDigitSystemFontOfSize:weight:",
         arguments, 2);
+}
+
+static uint64_t ds_remote_stroke_attributes(RemoteCall *process, uint64_t strokeColor, BOOL bold) {
+    uint64_t dictionaryClass = ds_remote_class(process, "NSDictionary");
+    uint64_t numberClass = ds_remote_class(process, "NSNumber");
+    if (!dictionaryClass || !numberClass || !strokeColor) return 0;
+    uint64_t alloc = ds_remote_sel(process, "alloc");
+    uint64_t widthObject = remote_msg(process, numberClass, alloc, 0, 0, 0, 0);
+    uint64_t width = widthObject ? remote_msg(process, widthObject, ds_remote_sel(process, "initWithInt:"),
+                                              (uint64_t)(int64_t)HUDTextOutlineStrokeWidth(bold), 0, 0, 0) : 0;
+    uint64_t keys[] = {
+        ds_remote_create_string(process, NSStrokeWidthAttributeName),
+        ds_remote_create_string(process, NSStrokeColorAttributeName)
+    };
+    uint64_t values[] = { width, strokeColor };
+    uint64_t attributes = 0;
+    // 字符串已复制内容，可复用文字暂存区传递数组；字典复制键并持有值。
+    // 描边属性只在样式变化时重建，避免每秒创建一套远端样式对象。
+    uint64_t scratch = process.trojanMem + kDSRemoteTextScratchOffset;
+    if (width && keys[0] && keys[1] && process.trojanMem &&
+        [process remote_write:scratch from:values size:sizeof(values)] &&
+        [process remote_write:scratch + sizeof(values) from:keys size:sizeof(keys)]) {
+        uint64_t object = remote_msg(process, dictionaryClass, alloc, 0, 0, 0, 0);
+        if (object) attributes = remote_msg(process, object, ds_remote_sel(process, "initWithObjects:forKeys:count:"),
+                                             scratch, scratch + sizeof(values), 2, 0);
+    }
+    uint64_t release = ds_remote_sel(process, "release");
+    for (uint64_t object : { width, keys[0], keys[1] }) {
+        if (object && release && process.trojanMem) remote_msg(process, object, release, 0, 0, 0, 0);
+    }
+    return attributes;
 }
 
 static uint64_t ds_remote_secure_canvas(RemoteCall *process, uint64_t textField) {
@@ -1155,7 +1207,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
                                    ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_perform_on_springboard_main(process, blurView,
                                    ds_remote_sel(process, "setBackgroundColor:"),
-                                   presentation.inverted ? white : safeBackground, YES);
+                                   presentation.transparentBackground ? clear : (presentation.inverted ? white : safeBackground), YES);
     ds_remote_set_u64_on_main(process, container, "setTag:", (uint64_t)kDSSpringBoardHUDTag);
     ds_remote_set_u64_on_main(process, container, "setHidden:", 0);
     ds_remote_set_u64_on_main(process, container, "setUserInteractionEnabled:", 0);
@@ -1174,7 +1226,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
                               (uint64_t)presentation.numberOfLines);
     ds_remote_set_u64_on_main(process, label, "setHidden:", 0);
     uint64_t font = ds_remote_font(process, presentation.fontSize,
-                                   presentation.inverted);
+                                   presentation.inverted, presentation.bold);
     if (!font) return 0;
     ds_perform_on_springboard_main(process, label,
                                    ds_remote_sel(process, "setFont:"), font, YES);
@@ -1182,7 +1234,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_u64_on_main(process, label, "setUserInteractionEnabled:", 0);
     ds_remote_set_u64_on_main(process, label, "setTextAlignment:",
                               (uint64_t)presentation.alignment);
-    ds_remote_set_double_on_main(process, label, "setAlpha:", 0.85);
+    ds_remote_set_double_on_main(process, label, "setAlpha:", presentation.transparentBackground ? 1.0 : 0.85);
 
     uint64_t layer = ds_remote_get_object_on_main(process, blurView, "layer");
     if (layer) {
@@ -1195,7 +1247,10 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_double_on_main(process, container, "setAlpha:", 1.0);
 
     if (!process.trojanMem) return 0;
-    if (!ds_remote_set_text_on_main(process, label, text)) return 0;
+    g_remoteTextAttributes = presentation.transparentBackground
+        ? ds_remote_stroke_attributes(process, presentation.inverted ? white : black, presentation.bold) : 0;
+    if (presentation.transparentBackground && !g_remoteTextAttributes) return 0;
+    if (!ds_remote_set_text_on_main(process, label, text, g_remoteTextAttributes)) return 0;
     ds_perform_on_springboard_main(process, blurView,
                                    ds_remote_sel(process, "addSubview:"), label, YES);
     ds_perform_on_springboard_main(process, container,
@@ -1230,6 +1285,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     g_lastContainerAlpha = 1.0;
     g_lastFontSize = presentation.fontSize;
     g_lastInverted = presentation.inverted;
+    g_lastBold = presentation.bold;
     g_focusUntil = CFAbsoluteTimeGetCurrent() + kDSHUDFocusDuration;
     return label;
 }
@@ -1239,6 +1295,10 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
 // leak the tiny view hierarchy for the lifetime of the remote session.
 static void ds_remove_springboard_hud(RemoteCall *process) {
     if (!g_remoteWindow || g_remoteWindowPid != process.pid) return;
+    if (g_remoteTextAttributes) {
+        remote_msg(process, g_remoteTextAttributes, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+        g_remoteTextAttributes = 0;
+    }
     if (g_remoteOrientationObserver) {
         ds_remote_invoke_noarg_on_main(process, g_remoteOrientationObserver, "invalidate");
         ds_remote_invoke_noarg_on_main(process, g_remoteOrientationObserver, "release");
@@ -1301,6 +1361,9 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
             ? ds_remote_get_object_on_main(process, colorClass, "darkGrayColor") : 0;
         uint64_t textColor = presentation->inverted ? black : white;
         uint64_t backgroundColor = presentation->inverted ? white : darkGray;
+        if (presentation->transparentBackground) {
+            backgroundColor = ds_remote_get_object_on_main(process, colorClass, "clearColor");
+        }
         if (textColor && backgroundColor) {
             ds_perform_on_springboard_main(process, g_remoteLabel,
                                            ds_remote_sel(process, "setTextColor:"), textColor, YES);
@@ -1309,15 +1372,30 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
                                            backgroundColor, YES);
         }
 
+        ds_remote_set_double_on_main(process, g_remoteLabel, "setAlpha:", presentation->transparentBackground ? 1.0 : 0.85);
+        uint64_t attributes = presentation->transparentBackground
+            ? ds_remote_stroke_attributes(process, presentation->inverted ? white : black, presentation->bold) : 0;
+        if (presentation->transparentBackground && !attributes) return NO;
+        if (g_remoteTextAttributes) {
+            remote_msg(process, g_remoteTextAttributes, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+        }
+        g_remoteTextAttributes = attributes;
+        if (!presentation->transparentBackground) {
+            // 切回原样时清空 attributedText，防止 UILabel 沿用旧描边。
+            ds_perform_on_springboard_main(process, g_remoteLabel,
+                                           ds_remote_sel(process, "setAttributedText:"), 0, YES);
+        }
+
         if (fabs(g_lastFontSize - presentation->fontSize) > 0.001 ||
-            g_lastInverted != presentation->inverted) {
+            g_lastInverted != presentation->inverted || g_lastBold != presentation->bold) {
             uint64_t font = ds_remote_font(process, presentation->fontSize,
-                                           presentation->inverted);
+                                           presentation->inverted, presentation->bold);
             if (!font) return NO;
             ds_perform_on_springboard_main(process, g_remoteLabel,
                                            ds_remote_sel(process, "setFont:"), font, YES);
             g_lastFontSize = presentation->fontSize;
             g_lastInverted = presentation->inverted;
+            g_lastBold = presentation->bold;
         }
 
         uint64_t layer = ds_remote_get_object_on_main(process, g_remoteBlurView, "layer");
@@ -1339,7 +1417,7 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
     }
 
     if (!process.trojanMem) return NO;
-    return ds_remote_set_text_on_main(process, g_remoteLabel, text);
+    return ds_remote_set_text_on_main(process, g_remoteLabel, text, g_remoteTextAttributes);
 }
 
 static void ds_update_rate(void) {
@@ -1577,6 +1655,7 @@ static void ds_finish_disable(void) {
     g_remoteBlurView = 0;
     g_remoteBlurEffect = 0;
     g_remoteLabel = 0;
+    g_remoteTextAttributes = 0;
     g_remoteSecureField = 0;
     g_remoteSecureCanvas = 0;
     g_remoteWindow = 0;
@@ -1591,6 +1670,7 @@ static void ds_finish_disable(void) {
     g_lastContainerAlpha = -1.0;
     g_lastFontSize = -1.0;
     g_lastInverted = NO;
+    g_lastBold = NO;
     g_lastHideAtSnapshot = NO;
     ds_reset_remote_symbol_cache();
     ds_stop_keepalive();

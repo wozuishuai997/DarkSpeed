@@ -33,6 +33,31 @@
     return self;
 }
 
+// UILabel 的固有尺寸不包含描边，预留内边距并同步绘制区域。
+- (void)setOutlineInset:(CGFloat)outlineInset
+{
+    _outlineInset = outlineInset;
+    [self invalidateIntrinsicContentSize];
+    [self setNeedsDisplay];
+}
+
+- (CGSize)intrinsicContentSize
+{
+    CGSize size = [super intrinsicContentSize];
+    return CGSizeMake(size.width + _outlineInset * 2, size.height + _outlineInset * 2);
+}
+
+- (CGSize)sizeThatFits:(CGSize)size
+{
+    CGSize fitted = [super sizeThatFits:size];
+    return CGSizeMake(fitted.width + _outlineInset * 2, fitted.height + _outlineInset * 2);
+}
+
+- (void)drawTextInRect:(CGRect)rect
+{
+    [super drawTextInRect:CGRectInset(rect, _outlineInset, _outlineInset)];
+}
+
 - (void)setColorInvertEnabled:(BOOL)colorInvertEnabled
 {
     _isColorInvertEnabled = colorInvertEnabled;

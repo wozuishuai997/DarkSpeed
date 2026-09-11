@@ -37,6 +37,13 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesInvertedColor = @"usesInve
 static HUDUserDefaultsKey const HUDUserDefaultsKeyKeepInPlace = @"keepInPlace";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyHideAtSnapshot = @"hideAtSnapshot";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyDisplayMode = @"displayMode";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesBoldFont = @"usesBoldFont";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyTransparentBackground = @"transparentBackground";
+
+// 负值同时绘制填充和描边；按字号百分比缩放，加粗时适当增加边宽。
+static inline int HUDTextOutlineStrokeWidth(BOOL bold) {
+    return bold ? -6 : -4;
+}
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRealCustomFontSize = @"realCustomFontSize";

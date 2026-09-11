@@ -18,6 +18,8 @@ enum TSSettingsIndex: Int, CaseIterable {
     case usesLargeFont
     case usesArrowPrefixes
     case usesBitrate
+    case usesBoldFont
+    case transparentBackground
 
     var key: String {
         switch self {
@@ -41,6 +43,10 @@ enum TSSettingsIndex: Int, CaseIterable {
             return HUDUserDefaultsKeyUsesArrowPrefixes
         case .usesBitrate:
             return HUDUserDefaultsKeyUsesBitrate
+        case .usesBoldFont:
+            return HUDUserDefaultsKeyUsesBoldFont
+        case .transparentBackground:
+            return HUDUserDefaultsKeyTransparentBackground
         }
     }
 
@@ -66,6 +72,10 @@ enum TSSettingsIndex: Int, CaseIterable {
             return NSLocalizedString("Prefixes", comment: "TSSettingsIndex")
         case .usesBitrate:
             return NSLocalizedString("Unit", comment: "TSSettingsIndex")
+        case .usesBoldFont:
+            return NSLocalizedString("Bold Text", comment: "TSSettingsIndex")
+        case .transparentBackground:
+            return NSLocalizedString("Background", comment: "TSSettingsIndex")
         }
     }
 
@@ -90,6 +100,7 @@ enum TSSettingsIndex: Int, CaseIterable {
             }
         case .keepInPlace: fallthrough
         case .hideAtSnapshot: fallthrough
+        case .usesBoldFont: fallthrough
         case .singleLineMode:
             return highlighted ? NSLocalizedString("ON", comment: "TSSettingsIndex") : NSLocalizedString("OFF", comment: "TSSettingsIndex")
         case .usesInvertedColor:
@@ -102,6 +113,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return highlighted ? NSLocalizedString("↑↓", comment: "TSSettingsIndex") : NSLocalizedString("▲▼", comment: "TSSettingsIndex")
         case .usesBitrate:
             return highlighted ? NSLocalizedString("b/s", comment: "TSSettingsIndex") : NSLocalizedString("B/s", comment: "TSSettingsIndex")
+        case .transparentBackground:
+            return highlighted ? NSLocalizedString("Transparent", comment: "TSSettingsIndex") : NSLocalizedString("Original", comment: "TSSettingsIndex")
         }
     }
 }
