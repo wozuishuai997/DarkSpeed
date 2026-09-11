@@ -149,6 +149,7 @@ static CFAbsoluteTime g_previousSampleTime = 0;
 static CFAbsoluteTime g_focusUntil = 0;
 static CFIndex g_previousDirtyFrameCount = 0;
 static BOOL g_needsFPSBaselineReset = YES;
+static CFTimeInterval g_previousFPSSampleTime = 0;
 static std::atomic<int> g_remoteOrientation(UIInterfaceOrientationUnknown);
 static int g_reloadHUDToken = -1;
 static int g_lockStateToken = -1;
@@ -666,16 +667,20 @@ static NSString *ds_display_text(NSDictionary *preferences,
                                                  ? NSDateFormatterMediumStyle : NSDateFormatterShortStyle)];
     }
     if (displayMode == HUDDisplayModeFPS) {
+        CFTimeInterval now = CACurrentMediaTime();
         CFIndex current = CARenderServerGetDirtyFrameCount(NULL);
         if (g_needsFPSBaselineReset) {
             g_previousDirtyFrameCount = current;
+            g_previousFPSSampleTime = now;
             g_needsFPSBaselineReset = NO;
             return @"0 FPS";
         }
         CFIndex frameDiff = MAX((CFIndex)0, current - g_previousDirtyFrameCount);
         g_previousDirtyFrameCount = current;
+        double interval = MAX(now - g_previousFPSSampleTime, 0.001);
+        g_previousFPSSampleTime = now;
         CGFloat maximumFPS = UIScreen.mainScreen.maximumFramesPerSecond;
-        return [NSString stringWithFormat:@"%.0f FPS", MIN((CGFloat)frameDiff, maximumFPS)];
+        return [NSString stringWithFormat:@"%.0f FPS", MIN((CGFloat)(frameDiff / interval), maximumFPS)];
     }
 
     BOOL bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
@@ -801,6 +806,8 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
         y = CGRectGetMinY(screenBounds) + safeInsets.top + topConstant;
     }
 
+    // 应用于最终位置，左／中／右及置顶均使用相同的正右负左规则。
+    x += MIN(MAX(ds_pref_double(preferences, HUDUserDefaultsKeyHorizontalOffset, 0), -100.0), 100.0);
     presentation.windowFrame = CGRectMake(round(x), round(y), hudSize.width, hudSize.height);
     presentation.blurFrame = CGRectMake(0, 0, hudSize.width, hudSize.height);
     presentation.labelFrame = CGRectMake(4, 2, labelSize.width, labelSize.height);
@@ -1480,6 +1487,14 @@ static void ds_update_rate(void) {
     }
 }
 
+static void ds_configure_rate_timer(NSDictionary *preferences) {
+    if (!g_rateTimer) return;
+    // 直接调整采样与绘制定时器，不保留每秒唤醒后跳过绘制的轮询。
+    int64_t interval = (int64_t)(HUDRefreshInterval(preferences) * NSEC_PER_SEC);
+    dispatch_source_set_timer(g_rateTimer, dispatch_time(DISPATCH_TIME_NOW, interval),
+                              (uint64_t)interval, 100 * NSEC_PER_MSEC);
+}
+
 static void ds_start_rate_timer(void) {
     if (g_rateTimer) return;
     g_previousInput = 0;
@@ -1488,9 +1503,7 @@ static void ds_start_rate_timer(void) {
     g_previousDirtyFrameCount = 0;
     g_needsFPSBaselineReset = YES;
     g_rateTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_bridge_queue());
-    dispatch_source_set_timer(g_rateTimer,
-                              dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
-                              NSEC_PER_SEC, 100 * NSEC_PER_MSEC);
+    ds_configure_rate_timer(ds_hud_preferences());
     dispatch_source_set_event_handler(g_rateTimer, ^{
         @autoreleasepool {
             ds_update_rate();
@@ -1523,6 +1536,7 @@ static void ds_register_hud_notifications(void) {
         (void)token;
         if (!g_hudActive.load()) return;
         NSDictionary *preferences = ds_hud_preferences();
+        ds_configure_rate_timer(preferences);
         ds_append_checkpoint([NSString stringWithFormat:
             @"HUD settings refreshed position=%@ size=%@ snapshot=%@",
             preferences[UIInterfaceOrientationIsLandscape(ds_interface_orientation())

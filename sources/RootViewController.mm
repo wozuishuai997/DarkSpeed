@@ -618,6 +618,32 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [_authorLabel setText:NSLocalizedString(@"Tap that button on the center again,\nto toggle ON/OFF “Dynamic Island” mode.", nil)];
 }
 
+- (double)hudHorizontalOffset
+{
+    [self loadUserDefaults:NO];
+    return MIN(MAX([_userDefaults[HUDUserDefaultsKeyHorizontalOffset] doubleValue], -100.0), 100.0);
+}
+
+- (void)setHUDHorizontalOffset:(double)offset
+{
+    [self loadUserDefaults:NO];
+    _userDefaults[HUDUserDefaultsKeyHorizontalOffset] = @(MIN(MAX(offset, -100.0), 100.0));
+    [self saveUserDefaults];
+}
+
+- (double)hudRefreshInterval
+{
+    [self loadUserDefaults:NO];
+    return HUDRefreshInterval(_userDefaults);
+}
+
+- (void)setHUDRefreshInterval:(double)interval
+{
+    [self loadUserDefaults:NO];
+    _userDefaults[HUDUserDefaultsKeyRefreshInterval] = @(MIN(MAX(interval, 1.0), 60.0));
+    [self saveUserDefaults];
+}
+
 - (double)hudFontSize
 {
     NSUserDefaults *defaults = GetStandardUserDefaults();
@@ -639,6 +665,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
 - (BOOL)settingHighlightedWithKey:(NSString * _Nonnull)key
 {
+    if ([key isEqualToString:HUDUserDefaultsKeyHorizontalOffset]) return [self hudHorizontalOffset] != 0;
+    if ([key isEqualToString:HUDUserDefaultsKeyRefreshInterval]) return [self hudRefreshInterval] != 1;
     if ([key isEqualToString:HUDUserDefaultsKeyUsesLargeFont]) return [self hudFontSize] > 9.0;
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:key];

@@ -20,6 +20,8 @@ enum TSSettingsIndex: Int, CaseIterable {
     case usesBitrate
     case usesBoldFont
     case transparentBackground
+    case horizontalOffset
+    case refreshInterval
 
     var key: String {
         switch self {
@@ -45,6 +47,10 @@ enum TSSettingsIndex: Int, CaseIterable {
             return HUDUserDefaultsKeyUsesBitrate
         case .usesBoldFont:
             return HUDUserDefaultsKeyUsesBoldFont
+        case .horizontalOffset:
+            return HUDUserDefaultsKeyHorizontalOffset
+        case .refreshInterval:
+            return HUDUserDefaultsKeyRefreshInterval
         case .transparentBackground:
             return HUDUserDefaultsKeyTransparentBackground
         }
@@ -74,12 +80,16 @@ enum TSSettingsIndex: Int, CaseIterable {
             return NSLocalizedString("Unit", comment: "TSSettingsIndex")
         case .usesBoldFont:
             return NSLocalizedString("Bold Text", comment: "TSSettingsIndex")
+        case .horizontalOffset:
+            return NSLocalizedString("Horizontal Offset", comment: "TSSettingsIndex")
+        case .refreshInterval:
+            return NSLocalizedString("Refresh Interval", comment: "TSSettingsIndex")
         case .transparentBackground:
             return NSLocalizedString("Background", comment: "TSSettingsIndex")
         }
     }
 
-    func subtitle(highlighted: Bool, restartRequired: Bool, displayMode: HUDDisplayMode, fontSize: Double) -> String {
+    func subtitle(highlighted: Bool, restartRequired: Bool, displayMode: HUDDisplayMode, fontSize: Double, horizontalOffset: Double, refreshInterval: Double) -> String {
         switch self {
         case .displayMode:
             switch displayMode {
@@ -113,6 +123,10 @@ enum TSSettingsIndex: Int, CaseIterable {
             return highlighted ? NSLocalizedString("↑↓", comment: "TSSettingsIndex") : NSLocalizedString("▲▼", comment: "TSSettingsIndex")
         case .usesBitrate:
             return highlighted ? NSLocalizedString("b/s", comment: "TSSettingsIndex") : NSLocalizedString("B/s", comment: "TSSettingsIndex")
+        case .horizontalOffset:
+            return String(format: NSLocalizedString("%+g pt", comment: "TSSettingsIndex"), horizontalOffset)
+        case .refreshInterval:
+            return String(format: NSLocalizedString("Every %g seconds", comment: "TSSettingsIndex"), refreshInterval)
         case .transparentBackground:
             return highlighted ? NSLocalizedString("Transparent", comment: "TSSettingsIndex") : NSLocalizedString("Original", comment: "TSSettingsIndex")
         }

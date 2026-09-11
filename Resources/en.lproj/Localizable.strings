@@ -225,3 +225,10 @@
 "Font Size" = "Font Size";
 "%g pt" = "%g pt";
 "Cancel" = "Cancel";
+"Horizontal Offset" = "Horizontal Offset";
+"Refresh Interval" = "Refresh Interval";
+"%+g pt" = "%+g pt";
+"Every %g seconds" = "Every %g seconds";
+"−100 to +100. Negative moves left; positive moves right." = "−100 to +100. Negative moves left; positive moves right.";
+"Controls automatic updates. Settings and lock changes still update immediately." = "Controls automatic updates. Settings and lock changes still update immediately.";
+"Apply" = "Apply";

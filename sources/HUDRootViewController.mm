@@ -110,7 +110,6 @@ static void SpringBoardLockStatusChanged
 #define KILOBYTES (1 << 10)
 #define MEGABYTES (1 << 20)
 #define GIGABYTES (1 << 30)
-#define UPDATE_INTERVAL 1.0
 #define SHOW_ALWAYS 1
 #define INLINE_SEPARATOR "\t"
 #define IDLE_INTERVAL 3.0
@@ -326,6 +325,8 @@ static UpDownBytes getUpDownBytes()
 static BOOL shouldUpdateSpeedLabel;
 static uint64_t prevOutputBytes = 0, prevInputBytes = 0;
 static CFIndex prevDirtyFrameCount = 0;
+static CFTimeInterval prevNetworkSampleTime = 0;
+static CFTimeInterval prevFPSSampleTime = 0;
 static NSAttributedString *attributedUploadPrefix = nil;
 static NSAttributedString *attributedDownloadPrefix = nil;
 static NSAttributedString *attributedInlineSeparator = nil;
@@ -347,6 +348,9 @@ static NSAttributedString *formattedAttributedString(BOOL isFocused)
         NSMutableAttributedString *mutableString = [[NSMutableAttributedString alloc] init];
 
         UpDownBytes upDownBytes = getUpDownBytes();
+        CFTimeInterval now = CACurrentMediaTime();
+        double interval = prevNetworkSampleTime > 0 ? MAX(now - prevNetworkSampleTime, 0.001) : 1.0;
+        prevNetworkSampleTime = now;
 
         uint64_t upDiff;
         uint64_t downDiff;
@@ -380,6 +384,10 @@ static NSAttributedString *formattedAttributedString(BOOL isFocused)
 
         prevOutputBytes = upDownBytes.outputBytes;
         prevInputBytes = upDownBytes.inputBytes;
+        if (!isFocused) {
+            upDiff = (uint64_t)(upDiff / interval);
+            downDiff = (uint64_t)(downDiff / interval);
+        }
 
         if (!SHOW_ALWAYS && (upDiff < 2 * KILOBYTES && downDiff < 2 * KILOBYTES))
         {
@@ -442,11 +450,13 @@ static NSAttributedString *formattedFPSAttributedString(BOOL isFocused)
 {
     @autoreleasepool
     {
+        CFTimeInterval now = CACurrentMediaTime();
         CFIndex dirtyFrameCount = CARenderServerGetDirtyFrameCount(NULL);
 
         if (needsFPSBaselineReset)
         {
             prevDirtyFrameCount = dirtyFrameCount;
+            prevFPSSampleTime = now;
             needsFPSBaselineReset = NO;
             shouldUpdateSpeedLabel = YES;
 
@@ -461,7 +471,8 @@ static NSAttributedString *formattedFPSAttributedString(BOOL isFocused)
 
         if (frameDiff < 0) frameDiff = 0;
 
-        double fps = (double)frameDiff / UPDATE_INTERVAL;
+        double fps = (double)frameDiff / MAX(now - prevFPSSampleTime, 0.001);
+        prevFPSSampleTime = now;
         double maxFPS = (double)[UIScreen mainScreen].maximumFramesPerSecond;
         if (fps > maxFPS) fps = maxFPS;
 
@@ -623,6 +634,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 
     prevInputBytes = 0;
     prevOutputBytes = 0;
+    prevNetworkSampleTime = 0;
     needsBaselineReset = YES;
     prevDirtyFrameCount = 0;
     needsFPSBaselineReset = YES;
@@ -899,7 +911,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 - (void)resetLoopTimer
 {
     [_timer invalidate];
-    _timer = [NSTimer scheduledTimerWithTimeInterval:UPDATE_INTERVAL target:self selector:@selector(updateSpeedLabel) userInfo:nil repeats:YES];
+    _timer = [NSTimer scheduledTimerWithTimeInterval:HUDRefreshInterval(_userDefaults) target:self selector:@selector(updateSpeedLabel) userInfo:nil repeats:YES];
 }
 
 - (void)stopLoopTimer
@@ -951,6 +963,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
         realCustomOffsetY = [self realCustomOffsetY];
     }
 
+    realCustomOffsetX += MIN(MAX([_userDefaults[HUDUserDefaultsKeyHorizontalOffset] doubleValue], -100.0), 100.0);
     UILayoutGuide *layoutGuide = self.view.safeAreaLayoutGuide;
     if (isLandscape)
     {

@@ -39,6 +39,14 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyHideAtSnapshot = @"hideAtSnaps
 static HUDUserDefaultsKey const HUDUserDefaultsKeyDisplayMode = @"displayMode";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesBoldFont = @"usesBoldFont";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyTransparentBackground = @"transparentBackground";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyHorizontalOffset = @"horizontalOffset";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyRefreshInterval = @"refreshInterval";
+
+static inline double HUDRefreshInterval(NSDictionary *preferences) {
+    NSNumber *interval = preferences[HUDUserDefaultsKeyRefreshInterval];
+    return interval ? MIN(MAX(interval.doubleValue, 1.0), 60.0) : 1.0;
+}
+
 
 // 负值同时绘制填充和描边；按字号百分比缩放，加粗时适当增加边宽。
 static inline int HUDTextOutlineStrokeWidth(BOOL bold) {

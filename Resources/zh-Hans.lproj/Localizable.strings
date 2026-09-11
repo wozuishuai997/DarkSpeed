@@ -225,3 +225,10 @@
 "Font Size" = "字号";
 "%g pt" = "%g 号";
 "Cancel" = "取消";
+"Horizontal Offset" = "水平偏移";
+"Refresh Interval" = "刷新间隔";
+"%+g pt" = "%+g 点";
+"Every %g seconds" = "每 %g 秒";
+"−100 to +100. Negative moves left; positive moves right." = "范围 −100 到 +100。负数向左，正数向右。";
+"Controls automatic updates. Settings and lock changes still update immediately." = "控制自动刷新间隔；修改设置或锁屏状态变化时仍会立即更新。";
+"Apply" = "应用";

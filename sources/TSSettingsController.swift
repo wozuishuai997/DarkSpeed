@@ -9,6 +9,10 @@ import UIKit
 
 @objc public protocol TSSettingsControllerDelegate {
     func displayMode() -> HUDDisplayMode
+    func hudHorizontalOffset() -> Double
+    func setHUDHorizontalOffset(_ offset: Double)
+    func hudRefreshInterval() -> Double
+    func setHUDRefreshInterval(_ interval: Double)
     func hudFontSize() -> Double
     func setHUDFontSize(_ size: Double)
     func settingHighlighted(key: String) -> Bool
@@ -30,7 +34,7 @@ import UIKit
     }
 
     open override func settingSubtitle(index: Int, highlighted: Bool) -> String? {
-        return TSSettingsIndex.allCases[index].subtitle(highlighted: highlighted, restartRequired: restartRequired, displayMode: delegate?.displayMode() ?? .speed, fontSize: delegate?.hudFontSize() ?? 9)
+        return TSSettingsIndex.allCases[index].subtitle(highlighted: highlighted, restartRequired: restartRequired, displayMode: delegate?.displayMode() ?? .speed, fontSize: delegate?.hudFontSize() ?? 9, horizontalOffset: delegate?.hudHorizontalOffset() ?? 0, refreshInterval: delegate?.hudRefreshInterval() ?? 1)
     }
 
     private func settingKey(index: Int) -> String {
@@ -67,6 +71,54 @@ import UIKit
     }
 
     open override func settingDidSelect(index: Int, completion: @escaping () -> ()) {
+        if index == TSSettingsIndex.horizontalOffset.rawValue {
+            let picker = UIAlertController(title: NSLocalizedString("Horizontal Offset", comment: ""),
+                                          message: NSLocalizedString("−100 to +100. Negative moves left; positive moves right.", comment: ""),
+                                          preferredStyle: .alert)
+            picker.addTextField { field in
+                field.keyboardType = .numbersAndPunctuation
+                field.text = String(format: "%g", self.delegate?.hudHorizontalOffset() ?? 0)
+            }
+            let parsedOffset: () -> Double? = { [weak picker] in
+                guard let text = picker?.textFields?.first?.text,
+                      let value = Double(text.trimmingCharacters(in: .whitespaces)),
+                      value.isFinite, (-100...100).contains(value) else { return nil }
+                return value
+            }
+            let save = UIAlertAction(title: NSLocalizedString("Apply", comment: ""), style: .default) { [weak self] _ in
+                guard let value = parsedOffset() else { return }
+                self?.delegate?.setHUDHorizontalOffset(value)
+                completion()
+            }
+            picker.textFields?.first?.addAction(UIAction { _ in
+                save.isEnabled = parsedOffset() != nil
+            }, for: .editingChanged)
+            picker.addAction(save)
+            picker.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
+            present(picker, animated: true)
+            return
+        }
+        if index == TSSettingsIndex.refreshInterval.rawValue {
+            let current = delegate?.hudRefreshInterval() ?? 1
+            let picker = UIAlertController(title: NSLocalizedString("Refresh Interval", comment: ""),
+                                          message: NSLocalizedString("Controls automatic updates. Settings and lock changes still update immediately.", comment: ""),
+                                          preferredStyle: .actionSheet)
+            for interval in [1, 2, 3, 5, 10, 15, 30, 60] {
+                let label = String(format: NSLocalizedString("Every %g seconds", comment: ""), Double(interval))
+                let title = current == Double(interval) ? "✓ " + label : label
+                picker.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                    self?.delegate?.setHUDRefreshInterval(Double(interval))
+                    completion()
+                })
+            }
+            picker.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
+            if let popover = picker.popoverPresentationController {
+                popover.sourceView = collectionView
+                popover.sourceRect = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame ?? collectionView.bounds
+            }
+            present(picker, animated: true)
+            return
+        }
         if index == TSSettingsIndex.usesLargeFont.rawValue {
             let currentSize = delegate?.hudFontSize() ?? 9
             let picker = UIAlertController(title: NSLocalizedString("Font Size", comment: ""),

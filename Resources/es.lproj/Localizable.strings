@@ -213,3 +213,10 @@
 "Font Size" = "Tamaño de letra";
 "%g pt" = "%g pt";
 "Cancel" = "Cancelar";
+"Horizontal Offset" = "Desplazamiento horizontal";
+"Refresh Interval" = "Intervalo de actualización";
+"%+g pt" = "%+g pt";
+"Every %g seconds" = "Cada %g segundos";
+"−100 to +100. Negative moves left; positive moves right." = "De −100 a +100. Negativo a la izquierda; positivo a la derecha.";
+"Controls automatic updates. Settings and lock changes still update immediately." = "Controla las actualizaciones automáticas. Los cambios de ajustes y bloqueo se aplican inmediatamente.";
+"Apply" = "Aplicar";
