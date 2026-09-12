@@ -199,6 +199,10 @@ static void ds_schedule_crash_report_collection(void);
 // 所以这里必须先声明。
 static void ds_request_full_reassert(const char *why);
 
+// RPC 层一旦报过任何失败就置位，此后不再发起任何远程调用。
+// 见 ds_write_heartbeat_line 里的说明：失败分支会把被注入线程留在标记地址上。
+static std::atomic_bool g_rpcHealthLost(false);
+
 // ---------------------------------------------------------------------------
 // 崩溃报告回收
 //
@@ -588,6 +592,26 @@ static void ds_write_heartbeat_line(void) {
     rc_take_probe_stats(&probeTotal, &probeSigned, &probeTimeout, &probePortFail);
     uint64_t rpcWait = 0, rpcSecond = 0, rpcUnexpected = 0, rpcFaultEntry = 0, rpcReplyFailed = 0;
     rc_take_rpc_errors(&rpcWait, &rpcSecond, &rpcUnexpected, &rpcFaultEntry, &rpcReplyFailed);
+
+    // 一次性硬闸门。
+    //
+    // RPC 层任何一个失败分支都会把被注入线程留在标记地址（0x101/0x201/0x301/0x401）上
+    // 没人纠正 —— 崩溃报告里 lr = 0xa242000000000401（带 PAC 签名的标记指针）说明线程
+    // 正是被一次"回复"放到那儿去的，而 0x401 未映射且不对齐，线程一执行 SpringBoard 就
+    // 是 SIGBUS。
+    //
+    // 所以只要计数器出现过任何非零值，就不再假装连接还健康：停掉刷新，让用户重开悬浮窗
+    // 去建一条全新的连接。宁可悬浮窗停住，也不能再发一次可能把线程放出去的远程调用。
+    uint64_t rpcFailures = rpcWait + rpcSecond + rpcUnexpected + rpcFaultEntry + rpcReplyFailed;
+    static uint64_t s_lastRpcFailures = 0;
+    if (rpcFailures > s_lastRpcFailures) {
+        s_lastRpcFailures = rpcFailures;
+        g_rpcHealthLost.store(true);
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"RPC layer reported failures (wait=%llu second=%llu unexpected=%llu faultAtEntry=%llu replyFailed=%llu)"
+             " — stopping all remote calls to keep the injected thread from being released onto a marker address",
+            rpcWait, rpcSecond, rpcUnexpected, rpcFaultEntry, rpcReplyFailed]);
+    }
 
     NSTimeInterval bgRemaining = UIApplication.sharedApplication.backgroundTimeRemaining;
     // backgroundTimeRemaining 在前台时返回一个极大值（DBL_MAX），只有在后台并且确实
@@ -2045,6 +2069,8 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
 static void ds_update_rate(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard || !g_remoteLabel) return;
+    // 硬闸门：RPC 层报过失败之后绝不再发远程调用。见 g_rpcHealthLost 的说明。
+    if (g_rpcHealthLost.load()) return;
 
     uint64_t input = 0;
     uint64_t output = 0;
