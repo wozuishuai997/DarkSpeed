@@ -195,6 +195,9 @@ static void ds_write_heartbeat_line(void);
 static void ds_diag_configure(BOOL enabled);
 static void ds_collect_crash_reports(void);
 static void ds_schedule_crash_report_collection(void);
+// 生命周期观察者在文件更靠前的位置注册，但真正实现（以及 g_forceFullReassert）在后面，
+// 所以这里必须先声明。
+static void ds_request_full_reassert(const char *why);
 
 // ---------------------------------------------------------------------------
 // 崩溃报告回收
@@ -222,52 +225,69 @@ static void ds_collect_crash_reports(void) {
     NSString *dest = [dir stringByAppendingPathComponent:@"CrashReports"];
     [fm createDirectoryAtPath:dest withIntermediateDirectories:YES attributes:nil error:nil];
 
-    // SpringBoard / backboardd / 内核的报告最先看，其余按目录顺序取。
-    NSArray<NSString *> *sources = @[
-        @"/var/mobile/Library/Logs/CrashReporter",
-        @"/private/var/mobile/Library/Logs/CrashReporter",
-        @"/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs",
-        @"/private/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs",
-        @"/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs/sysdiagnose",
-        @"/var/mobile/Library/Logs/CrashReporter/Retired",
-        @"/private/var/mobile/Library/Logs/CrashReporter/Retired",
-        @"/var/mobile/Library/Logs/DiagnosticReports",
-        @"/private/var/mobile/Library/Logs/DiagnosticReports",
-        @"/var/mobile/Library/Logs/panic-base",
-        @"/private/var/mobile/Library/Logs/panic-base",
-        @"/var/mobile/Library/Logs/CrashReporter/panics",
-        @"/private/var/mobile/Library/Logs/CrashReporter/panics",
+    // iOS 上 /var 就是 /private/var 的符号链接，所以只用一个根，否则每个目录都会被
+    // 扫两遍、文件也会被当成两个来源报两次。
+    NSArray<NSString *> *roots = @[
+        @"/var/mobile/Library/Logs",
     ];
+    NSArray<NSString *> *subdirs = @[
+        @"CrashReporter",
+        @"CrashReporter/DiagnosticLogs",
+        @"CrashReporter/DiagnosticLogs/sysdiagnose",
+        @"CrashReporter/Retired",
+        @"CrashReporter/panics",
+        @"DiagnosticReports",
+        @"panic-base",
+        @"panics",
+    ];
+    NSMutableArray<NSString *> *sources = [NSMutableArray array];
+    for (NSString *root in roots) {
+        for (NSString *sub in subdirs) {
+            [sources addObject:[root stringByAppendingPathComponent:sub]];
+        }
+    }
 
-    // 关注对象：SpringBoard 本身、它依赖的系统服务，以及内核 panic。
+    // 关注对象：SpringBoard 本身、它依赖的系统服务，以及内核 panic / jetsam。
     NSArray<NSString *> *interest = @[
-        @"SpringBoard", @"backboardd", @"runningboardd", @"watchdog",
+        @"springboard", @"backboardd", @"runningboardd", @"watchdog",
         @"panic", @"socd", @"jetsam", @"stackshot",
     ];
 
     NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-14.0 * 24.0 * 60.0 * 60.0];
     NSMutableArray<NSString *> *found = [NSMutableArray array];
+    NSMutableArray<NSString *> *unreadable = [NSMutableArray array];
+    NSMutableArray<NSString *> *empty = [NSMutableArray array];
     unsigned long long totalBytes = 0;
     NSUInteger scanned = 0;
 
     for (NSString *src in sources) {
         BOOL isDir = NO;
-        if (![fm fileExistsAtPath:src isDirectory:&isDir]) continue;
-
-        NSArray<NSString *> *names = nil;
-        if (isDir) {
-            names = [fm contentsOfDirectoryAtPath:src error:nil];
-        } else {
-            names = @[ src.lastPathComponent ];
+        if (![fm fileExistsAtPath:src isDirectory:&isDir]) {
+            [empty addObject:src];
+            continue;
         }
-        if (!names.count) continue;
+
+        NSError *listError = nil;
+        NSArray<NSString *> *names = isDir
+            ? [fm contentsOfDirectoryAtPath:src error:&listError]
+            : @[ src.lastPathComponent ];
+        if (!names) {
+            // 这一条最要紧：说明我们根本没有权限读系统日志目录，收集器等于没装。
+            [unreadable addObject:[NSString stringWithFormat:@"%@ (%@)", src,
+                listError.localizedDescription ?: @"unreadable"]];
+            continue;
+        }
+        if (!names.count) {
+            [empty addObject:src];
+            continue;
+        }
 
         for (NSString *name in names) {
-            if (scanned++ > 400) break;
+            if (scanned++ > 250) break;
             NSString *lower = name.lowercaseString;
             BOOL interesting = NO;
             for (NSString *key in interest) {
-                if ([lower rangeOfString:key.lowercaseString].location != NSNotFound) {
+                if ([lower rangeOfString:key].location != NSNotFound) {
                     interesting = YES;
                     break;
                 }
@@ -282,7 +302,7 @@ static void ds_collect_crash_reports(void) {
 
             NSString *safe = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
             NSString *target = [dest stringByAppendingPathComponent:safe];
-            // 同名且已经完整拷贝过的就不重复拷，避免每次启动都堆一份。
+            // 同名且大小一致的就不重复拷，避免每次启动都堆一份。
             NSDictionary *existing = [fm attributesOfItemAtPath:target error:nil];
             if (existing &&
                 [existing[NSFileSize] unsignedLongLongValue] ==
@@ -304,27 +324,43 @@ static void ds_collect_crash_reports(void) {
         }
     }
 
-    if (!found.count) {
-        ds_append_checkpoint(@"crash reports: none found "
-                             @"(no SpringBoard/backboardd/panic entries in the system log dirs)");
-        return;
+    // 结果本身先写一条，然后**无论有没有收获**都把探测情况写出来。否则"什么都没
+    // 找到"和"根本没权限读"在日志里长得一模一样，而那两件事要往完全相反的方向查。
+    if (found.count) {
+        NSUInteger listed = MIN(found.count, (NSUInteger)12);
+        NSString *names = [[found subarrayWithRange:NSMakeRange(0, listed)]
+            componentsJoinedByString:@"\n    "];
+        NSString *remainder = @"";
+        if (found.count > listed) {
+            remainder = [NSString stringWithFormat:@"\n    ... and %lu more",
+                                                   (unsigned long)(found.count - listed)];
+        }
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"crash reports: collected %lu (%@ total) -> Documents/DarkSpeedLogs/CrashReports/\n    %@%@",
+            (unsigned long)found.count,
+            ds_human_size(totalBytes),
+            names,
+            remainder]);
+    } else {
+        ds_append_checkpoint(@"crash reports: nothing matched in the system log directories");
     }
 
-    // 只列最近 12 条，避免这一行本身把日志撑爆。
-    NSUInteger listed = MIN(found.count, (NSUInteger)12);
-    NSString *names = [[found subarrayWithRange:NSMakeRange(0, listed)]
-        componentsJoinedByString:@"\n    "];
-    NSString *remainder = @"";
-    if (found.count > listed) {
-        remainder = [NSString stringWithFormat:@"\n    ... and %lu more",
-                                               (unsigned long)(found.count - listed)];
-    }
+    // 探测摘要：读不了的目录一律列出来，能读但为空的只报个数（否则每次启动都是一大段）。
+    NSString *unreadableField = unreadable.count
+        ? [NSString stringWithFormat:@"\n    UNREADABLE: %@",
+           [unreadable componentsJoinedByString:@"\n                "]]
+        : @"";
     ds_append_checkpoint([NSString stringWithFormat:
-        @"crash reports: collected %lu (%@ total) -> Documents/DarkSpeedLogs/CrashReports/\n    %@%@",
-        (unsigned long)found.count,
-        ds_human_size(totalBytes),
-        names,
-        remainder]);
+        @"crash report probe: %lu dirs, %lu empty/absent, %lu unreadable%@",
+        (unsigned long)sources.count,
+        (unsigned long)empty.count,
+        (unsigned long)unreadable.count,
+        unreadableField]);
+    if (found.count) {
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"crash report copies now in DarkSpeedLogs/CrashReports/: %lu file(s)",
+            (unsigned long)[fm contentsOfDirectoryAtPath:dest error:nil].count]);
+    }
 }
 
 // 每个进程只做一轮，重复调用是空操作 —— 它是从多个入口（冷启动、启用悬浮窗、
@@ -453,12 +489,15 @@ static void ds_start_lifecycle_logging(void) {
             (void)note;
             g_inBackground = NO;
             ds_append_checkpoint(@"lifecycle: will enter FOREGROUND");
+            // 回到前台是"悬浮窗卡住"最可靠的恢复时机：让下一次刷新把整套状态重下一遍。
+            ds_request_full_reassert("app returned to foreground");
             g_lastHeartbeat = 0;
             ds_write_heartbeat_line();
         });
         ds_observe_lifecycle(UIApplicationDidBecomeActiveNotification, ^(NSNotification *note) {
             (void)note;
             ds_append_checkpoint(@"lifecycle: became ACTIVE");
+            ds_request_full_reassert("app became active");
         });
         // 将终止：若系统给了通知，这是最后一条能写下的记录。
         ds_observe_lifecycle(UIApplicationWillTerminateNotification, ^(NSNotification *note) {
@@ -485,6 +524,25 @@ static void ds_note_sent_text(NSString *text, BOOL appliedStyle) {
     g_lastSentText = [text copy];
     g_lastAppliedStyle = appliedStyle;
     g_sendCount++;
+}
+
+// 重新下发一遍全部界面状态，并把窗口藏起来再显示。
+//
+// 这是针对"悬浮窗卡住不动"的自愈路径。症状是应用仍在刷新、远端调用也成功（日志里
+// sends 一直在涨），但 SpringBoard 不再重绘那扇窗口；把应用切到前台就能恢复——说明
+// 问题出在 SpringBoard 侧的合成/绘制，而不是数据。
+//
+// 让窗口先隐藏再显示会强制它重新进入合成树，从而丢掉"label 已经是这个文字了所以
+// 不用重绘"的旧状态；配合清空帧缓存，整套几何与样式都会重下一次。代价是若干次远程
+// 调用，只在前后台切换、屏幕解锁这类低频时刻使用。
+static volatile BOOL g_forceFullReassert = NO;
+
+static void ds_request_full_reassert(const char *why) {
+    g_forceFullReassert = YES;
+    os_log(OS_LOG_DEFAULT, "[DSBridge] full re-assert requested (%{public}s)", why ?: "?");
+    ds_append_checkpoint([NSString stringWithFormat:
+        @"full re-assert requested (%s): hiding and re-showing the SpringBoard HUD window",
+        why ?: "?"]);
 }
 
 static void ds_write_heartbeat_line(void) {
@@ -1842,6 +1900,22 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
         return NO;
     }
 
+    // 强制重绘请求在本函数开头就取走并清掉：这样即使中途 return NO，也不会把标志
+    // 留下来让每一次后续刷新都走一遍昂贵的隐藏/显示流程。
+    BOOL reassert = g_forceFullReassert;
+    g_forceFullReassert = NO;
+    if (reassert) {
+        applyStyle = YES;
+        // 先作废几何缓存，下面两个比较才会判定"变了"，把帧真正重下一次。
+        g_lastWindowFrame = CGRectNull;
+        g_lastLabelFrame = CGRectNull;
+        g_lastWindowHidden = NO;
+        // 藏起来再显示，强制窗口重建在合成树里的状态。这是"数据一直在下发但屏幕
+        // 不动"能恢复过来的关键。
+        ds_remote_set_u64_on_main(process, g_remoteWindow, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, g_remoteWindow, "setHidden:", 0);
+    }
+
     if (!CGRectEqualToRect(g_lastWindowFrame, presentation->windowFrame)) {
         ds_remote_set_rect_on_main(process, g_remoteWindow, "setFrame:",
                                    presentation->windowFrame);
@@ -2324,6 +2398,36 @@ static void ds_finish_enable(void) {
                (unsigned long long)sbProc, (unsigned long long)ds_get_our_proc());
         g_dsProgress.store(0.98);
         ds_set_stage(ds_localized(@"Connecting to SpringBoard"));
+
+        // 关键：建新连接之前必须先拆掉旧连接。
+        //
+        // 每个 RemoteCall 都会往 SpringBoard 注入一条线程，并让它在**我们进程**的异常
+        // 端口上等回复。以前这里直接 g_springBoard = [[RemoteCall alloc] ...]，旧对象
+        // 被覆盖后就成了孤儿：它的异常端口名仍留在我们进程里，但已经没有任何代码会去
+        // 收那条线程的异常。反复启用就会在 SpringBoard 里攒下一条条这样的线程，直到某
+        // 一条被内核调度执行、在未映射的标记地址（0x101/0x201/0x301/0x401）上取指，
+        // 直接杀死 SpringBoard —— 而且不留崩溃报告。
+        //
+        // 这条路径以前只在"关闭悬浮窗"时走到，而用户遇到的是反复前后台切换后第三次
+        // 打开即重载，正好符合"每次启用泄漏一条"的累积特征。
+        if (g_springBoard) {
+            RemoteCall *previous = g_springBoard;
+            g_springBoard = nil;
+            @try {
+                ds_append_checkpoint(@"destroying previous SpringBoard connection before reconnecting");
+                ds_remove_springboard_hud(previous);
+            } @catch (NSException *exception) {
+                os_log_error(OS_LOG_DEFAULT, "[DSBridge] previous HUD removal exception: %{public}@",
+                             exception.reason);
+            }
+            @try {
+                [previous destroyRemoteCall];
+            } @catch (NSException *exception) {
+                os_log_error(OS_LOG_DEFAULT, "[DSBridge] previous destroyRemoteCall exception: %{public}@",
+                             exception.reason);
+            }
+        }
+
         ds_reset_remote_symbol_cache();
         g_springBoard = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
         if (!g_springBoard || !g_springBoard.trojanMem || g_springBoard.pid <= 1) {
