@@ -48,9 +48,14 @@ static inline double HUDRefreshInterval(NSDictionary *preferences) {
 }
 
 
-// 负值同时绘制填充和描边；按字号百分比缩放，加粗时适当增加边宽。
+// NSStrokeWidthAttributeName 的负值表示"同时绘制填充与描边"，单位是**字号百分比**。
+//
+// 这个值会沿轮廓把字形向外扩张；逐字描边时相邻字形的轮廓会互相侵入 —— 等宽数字的
+// 字距本来就很紧，过大就会糊在一起（9 与 2 相接处即如此）。因此取足够小的值：
+// 1% 在 24 号字上约 0.24pt，仍能提供对比度，但对字距的侵占显著减小。
+// 需要更强对比时应调整描边颜色或背景，而不是加大这个值。
 static inline int HUDTextOutlineStrokeWidth(BOOL bold) {
-    return bold ? -3 : -2;
+    return bold ? -2 : -1;
 }
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
