@@ -265,6 +265,66 @@ static CGFloat ds_resident_memory_mb(void) {
     return (CGFloat)info.resident_size / (1024.0 * 1024.0);
 }
 
+// 记录当前是否在后台，以及系统还允许多少后台时间。
+// 后台运行时间用尽被终止，是"应用在后台消失"最常见的系统侧原因。
+static volatile BOOL g_inBackground = NO;
+
+// 应用生命周期观察者。
+//
+// 实测：DarkSpeed 在后台运行约 63 分钟后被系统杀掉，且没有任何收尾记录 —— 这正是
+// jetsam 内存回收或后台时间耗尽被终止的特征。之前完全没有生命周期日志，因此无法区分。
+// 这里把每一次前后台切换、内存警告、以及终止前可捕获的信号都落盘。
+static id g_lifecycleObservers[5];
+static int g_lifecycleObserverCount = 0;
+
+static void ds_observe_lifecycle(NSNotificationName name, void (^handler)(NSNotification *)) {
+    if (!name || g_lifecycleObserverCount >= 5) return;
+    id token = [NSNotificationCenter.defaultCenter addObserverForName:name
+                                                             object:nil
+                                                              queue:NSOperationQueue.mainQueue
+                                                         usingBlock:handler];
+    g_lifecycleObservers[g_lifecycleObserverCount++] = token;
+}
+
+static void ds_start_lifecycle_logging(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ds_observe_lifecycle(UIApplicationDidEnterBackgroundNotification, ^(NSNotification *note) {
+            (void)note;
+            g_inBackground = YES;
+            NSTimeInterval remaining = UIApplication.sharedApplication.backgroundTimeRemaining;
+            ds_append_checkpoint([NSString stringWithFormat:
+                @"lifecycle: entered BACKGROUND (bgTimeRemaining=%.0fs)", remaining]);
+            // 进后台立刻落一次心跳，记录进入后台那一刻的内存与状态。
+            g_lastHeartbeat = 0;
+            ds_write_heartbeat_line();
+        });
+        ds_observe_lifecycle(UIApplicationWillEnterForegroundNotification, ^(NSNotification *note) {
+            (void)note;
+            g_inBackground = NO;
+            ds_append_checkpoint(@"lifecycle: will enter FOREGROUND");
+            g_lastHeartbeat = 0;
+            ds_write_heartbeat_line();
+        });
+        ds_observe_lifecycle(UIApplicationDidBecomeActiveNotification, ^(NSNotification *note) {
+            (void)note;
+            ds_append_checkpoint(@"lifecycle: became ACTIVE");
+        });
+        // 将终止：若系统给了通知，这是最后一条能写下的记录。
+        ds_observe_lifecycle(UIApplicationWillTerminateNotification, ^(NSNotification *note) {
+            (void)note;
+            ds_append_checkpoint(@"lifecycle: WILL TERMINATE");
+            g_lastHeartbeat = 0;
+            ds_write_heartbeat_line();
+        });
+        ds_observe_lifecycle(UIApplicationDidReceiveMemoryWarningNotification, ^(NSNotification *note) {
+            (void)note;
+            ds_append_checkpoint([NSString stringWithFormat:
+                @"lifecycle: MEMORY WARNING rss=%.1fMB", ds_resident_memory_mb()]);
+        });
+    });
+}
+
 static void ds_write_heartbeat_line(void) {
     if (!g_diagEnabled.load()) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -273,17 +333,67 @@ static void ds_write_heartbeat_line(void) {
 
     NSString *dir = ds_log_directory();
     if (!dir.length) return;
-    NSString *path = [dir stringByAppendingPathComponent:@"Heartbeat.log"];
+
+    CGFloat rss = ds_resident_memory_mb();
+    static CGFloat s_peakRSS = 0;
+    if (rss > s_peakRSS) s_peakRSS = rss;
+
+    uint64_t probeTotal = 0, probeSigned = 0, probeTimeout = 0, probePortFail = 0;
+    rc_take_probe_stats(&probeTotal, &probeSigned, &probeTimeout, &probePortFail);
+    uint64_t rpcWait = 0, rpcSecond = 0, rpcUnexpected = 0, rpcFaultEntry = 0, rpcReplyFailed = 0;
+    rc_take_rpc_errors(&rpcWait, &rpcSecond, &rpcUnexpected, &rpcFaultEntry, &rpcReplyFailed);
+
+    NSTimeInterval bgRemaining = UIApplication.sharedApplication.backgroundTimeRemaining;
+    // backgroundTimeRemaining 在前台时返回一个极大值，仅在后台时才有意义。
+    NSString *bgField = g_inBackground
+        ? [NSString stringWithFormat:@"bg=1 bgRemain=%.0fs", bgRemaining]
+        : @"bg=0";
+
     NSString *line = [NSString stringWithFormat:
-        @"%@  uptime=%.0fs hud=%d label=%d win=%d rss=%.1fMB probes=%llu\n",
+        @"%@  uptime=%.0fs hud=%d label=%d win=%d %@ rss=%.1fMB peakRss=%.1fMB"
+         " probes=%llu/%llu rpc=%llu/%llu/%llu/%llu/%llu\n",
         NSDate.date,
         g_diagStart > 0 ? now - g_diagStart : 0,
         g_hudActive.load() ? 1 : 0,
         g_remoteLabel ? 1 : 0,
         g_remoteWindow ? 1 : 0,
-        ds_resident_memory_mb(),
-        ({ uint64_t t=0,s=0,to=0,pf=0; rc_take_probe_stats(&t,&s,&to,&pf); t; })];
-    [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        bgField,
+        rss,
+        s_peakRSS,
+        probeTotal, probeSigned,
+        rpcWait, rpcSecond, rpcUnexpected, rpcFaultEntry, rpcReplyFailed];
+
+    // 终态文件：每次覆盖，体积恒定。
+    [line writeToFile:[dir stringByAppendingPathComponent:@"Heartbeat.log"]
+           atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // 趋势文件：追加写入，界内轮转，可回溯被杀前的增长过程。
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *samples = [dir stringByAppendingPathComponent:@"Samples.log"];
+    ds_rotate_log_if_needed(samples, data.length);
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:samples];
+    if (handle) {
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+            [handle synchronizeFile];
+        } @catch (__unused NSException *exception) {
+        }
+        [handle closeFile];
+    } else {
+        [data writeToFile:samples options:NSDataWritingAtomic error:nil];
+    }
+
+    // 事件型采样：内存出现明显抬升时在主日志留一条，便于事后定位拐点。
+    if (s_peakRSS > 0 && rss > 200.0 && rss >= s_peakRSS - 0.5) {
+        static CGFloat s_lastRSSNote = 0;
+        if (rss - s_lastRSSNote > 50.0) {
+            s_lastRSSNote = rss;
+            ds_append_checkpoint([NSString stringWithFormat:
+                @"memory high: rss=%.1fMB uptime=%.0fs", rss,
+                g_diagStart > 0 ? now - g_diagStart : 0]);
+        }
+    }
 }
 
 
@@ -634,6 +744,10 @@ static void ds_probe_network_until_ready(CFAbsoluteTime startedAt, NSUInteger at
 }
 
 void DSBridgeWarmUpNetworkAndPrefetchKernelCache(void) {
+    // 启动时就建好日志目录并开始生命周期记录：用户无需先启用悬浮窗即可在
+    // 「文件」App 里看到日志，前后台切换也有据可查。
+    (void)ds_log_directory();
+    ds_start_lifecycle_logging();
     BOOL hasBuiltinOffsets = install_builtin_kernel_symbol_offsets();
     if (hasBuiltinOffsets || ds_has_symbol_offsets()) {
         g_kernelPrefetchState.store(2);
@@ -1977,6 +2091,7 @@ static void ds_finish_enable(void) {
     if (!g_hudRequested.load()) return;
     // 按设置决定是否记录诊断日志（默认关闭）。
     (void)ds_log_directory();
+    ds_start_lifecycle_logging();
     ds_diag_configure(ds_pref_bool(ds_hud_preferences(), HUDUserDefaultsKeyDetailedLogging));
     g_dsRunning.store(true);
     g_dsProgress.store(0.0);
