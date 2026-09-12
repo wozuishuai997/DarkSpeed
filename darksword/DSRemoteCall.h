@@ -44,6 +44,14 @@ uint64_t remote_msg(RemoteCall *process, uint64_t object, uint64_t selector,
 uint64_t remote_NSString(RemoteCall *process, const char *string);
 CGRect remote_getCGRect(RemoteCall *process, uint64_t object, uint64_t selector);
 void remote_setCGRect(RemoteCall *process, uint64_t object, uint64_t selector, CGRect rect);
+
+/// Track the one long-lived SpringBoard connection so its health can be queried
+/// without reaching into the object graph. Declared here (not only in the
+/// vendored header) because this bridge compiles against this shim.
+void rc_set_active_connection(RemoteCall *connection);
+/// NO when the active connection may have left a thread in SpringBoard in a state
+/// we no longer own; the bridge must then stop issuing remote calls.
+BOOL rc_connection_healthy(void);
 #ifdef __cplusplus
 }
 #endif

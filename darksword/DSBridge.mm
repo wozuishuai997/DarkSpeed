@@ -177,6 +177,7 @@ static const uint64_t kDSRemoteTextScratchOffset = 0x1000;
 static const size_t kDSRemoteTextScratchCapacity = 0x800;
 
 static void ds_update_rate(void);
+static void ds_stop_rate_timer(void);
 static void ds_stop_keepalive(void);
 
 typedef struct {
