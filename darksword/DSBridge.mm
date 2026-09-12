@@ -312,15 +312,19 @@ static void ds_collect_crash_reports(void) {
 
     // 只列最近 12 条，避免这一行本身把日志撑爆。
     NSUInteger listed = MIN(found.count, (NSUInteger)12);
+    NSString *names = [[found subarrayWithRange:NSMakeRange(0, listed)]
+        componentsJoinedByString:@"\n    "];
+    NSString *remainder = @"";
+    if (found.count > listed) {
+        remainder = [NSString stringWithFormat:@"\n    ... and %lu more",
+                                               (unsigned long)(found.count - listed)];
+    }
     ds_append_checkpoint([NSString stringWithFormat:
         @"crash reports: collected %lu (%@ total) -> Documents/DarkSpeedLogs/CrashReports/\n    %@%@",
         (unsigned long)found.count,
         ds_human_size(totalBytes),
-        [found subarrayWithRange:NSMakeRange(0, listed)]
-            componentsJoinedByString:@"\n    "],
-        found.count > listed
-            ? [NSString stringWithFormat:@"\n    ... and %lu more", (unsigned long)(found.count - listed)]
-            : @""]);
+        names,
+        remainder]);
 }
 
 // 每个进程只做一轮，重复调用是空操作 —— 它是从多个入口（冷启动、启用悬浮窗、
