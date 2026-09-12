@@ -32,6 +32,11 @@ extern "C" {
 void rc_take_probe_stats(uint64_t *total, uint64_t *signedOut,
                          uint64_t *timeoutOut, uint64_t *portFailOut);
 
+/// RPC 层失败计数（等不到异常 / 等不到返回 / 意外回复 / 入口故障 / 回复失败）。
+void rc_take_rpc_errors(uint64_t *waitTimeout, uint64_t *secondTimeout,
+                        uint64_t *unexpectedReturn, uint64_t *faultAtEntry,
+                        uint64_t *replyFailed);
+
 /// 诊断回调：底层在关键事件（线程创建、探测结果、异常状态）上调用它。
 /// 应用侧注册后即可把这些事件写入可离线读取的日志；未注册时开销为一次判空。
 typedef void (*rc_diag_log_t)(const char *message);

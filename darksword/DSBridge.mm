@@ -274,6 +274,12 @@ static NSString *ds_diag_snapshot(void) {
     [out appendFormat:@"probes total=%llu signed=%llu timeout=%llu portFail=%llu\n",
          probeTotal, probeSigned, probeTimeout, probePortFail];
 
+    // RPC 层失败计数：连接是否在崩溃前就已经在失败、失败形式是什么。
+    uint64_t rpcWait = 0, rpcSecond = 0, rpcUnexpected = 0, rpcFaultEntry = 0, rpcReplyFailed = 0;
+    rc_take_rpc_errors(&rpcWait, &rpcSecond, &rpcUnexpected, &rpcFaultEntry, &rpcReplyFailed);
+    [out appendFormat:@"rpc waitTimeout=%llu secondTimeout=%llu unexpectedReturn=%llu faultAtEntry=%llu replyFailed=%llu\n",
+         rpcWait, rpcSecond, rpcUnexpected, rpcFaultEntry, rpcReplyFailed];
+
     os_unfair_lock_lock(&g_diagLock);
     int count = g_diagRingCount;
     int start = (g_diagRingHead - count + DS_DIAG_RING_LINES) % DS_DIAG_RING_LINES;
