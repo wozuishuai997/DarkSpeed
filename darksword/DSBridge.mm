@@ -18,6 +18,7 @@
 #import <os/log.h>
 
 #include <atomic>
+#include <cmath>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -191,6 +192,151 @@ static void ds_diag_record(const char *message) {
 
 static void ds_diag_flush(void);
 static void ds_write_heartbeat_line(void);
+static void ds_diag_configure(BOOL enabled);
+static void ds_collect_crash_reports(void);
+static void ds_schedule_crash_report_collection(void);
+
+// ---------------------------------------------------------------------------
+// 崩溃报告回收
+//
+// 面对"打开应用即重载 SpringBoard"这类现象，我们自己的日志只能记录本方进程做了
+// 什么；SpringBoard 那一边的证据在系统目录里。iOS 回写崩溃报告有延迟，进程被杀
+// 退时报告往往还没落盘，所以这里做两次：启动时收一次（拿到上一次会话留下的），
+// 五秒后再收一次。
+//
+// 有意不依赖「详细日志」开关：崩溃报告是低频事件，一次拷贝只有几十 KB，而我们最
+// 需要的恰恰是"用户下次打开应用时证据还在"。目录是硬编码的，不做递归遍历，每个
+// 来源最多扫 400 个文件。本函数运行在我们自己的进程里，与 RemoteCall 热路径无关。
+// ---------------------------------------------------------------------------
+static NSString *ds_human_size(unsigned long long bytes) {
+    if (bytes >= 1024ull * 1024ull) {
+        return [NSString stringWithFormat:@"%.1fMB", (double)bytes / (1024.0 * 1024.0)];
+    }
+    return [NSString stringWithFormat:@"%.0fKB", (double)bytes / 1024.0];
+}
+
+static void ds_collect_crash_reports(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *dir = ds_log_directory();
+    if (!dir.length) return;
+    NSString *dest = [dir stringByAppendingPathComponent:@"CrashReports"];
+    [fm createDirectoryAtPath:dest withIntermediateDirectories:YES attributes:nil error:nil];
+
+    // SpringBoard / backboardd / 内核的报告最先看，其余按目录顺序取。
+    NSArray<NSString *> *sources = @[
+        @"/var/mobile/Library/Logs/CrashReporter",
+        @"/private/var/mobile/Library/Logs/CrashReporter",
+        @"/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs",
+        @"/private/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs",
+        @"/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs/sysdiagnose",
+        @"/var/mobile/Library/Logs/CrashReporter/Retired",
+        @"/private/var/mobile/Library/Logs/CrashReporter/Retired",
+        @"/var/mobile/Library/Logs/DiagnosticReports",
+        @"/private/var/mobile/Library/Logs/DiagnosticReports",
+        @"/var/mobile/Library/Logs/panic-base",
+        @"/private/var/mobile/Library/Logs/panic-base",
+        @"/var/mobile/Library/Logs/CrashReporter/panics",
+        @"/private/var/mobile/Library/Logs/CrashReporter/panics",
+    ];
+
+    // 关注对象：SpringBoard 本身、它依赖的系统服务，以及内核 panic。
+    NSArray<NSString *> *interest = @[
+        @"SpringBoard", @"backboardd", @"runningboardd", @"watchdog",
+        @"panic", @"socd", @"jetsam", @"stackshot",
+    ];
+
+    NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-14.0 * 24.0 * 60.0 * 60.0];
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
+    unsigned long long totalBytes = 0;
+    NSUInteger scanned = 0;
+
+    for (NSString *src in sources) {
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:src isDirectory:&isDir]) continue;
+
+        NSArray<NSString *> *names = nil;
+        if (isDir) {
+            names = [fm contentsOfDirectoryAtPath:src error:nil];
+        } else {
+            names = @[ src.lastPathComponent ];
+        }
+        if (!names.count) continue;
+
+        for (NSString *name in names) {
+            if (scanned++ > 400) break;
+            NSString *lower = name.lowercaseString;
+            BOOL interesting = NO;
+            for (NSString *key in interest) {
+                if ([lower rangeOfString:key.lowercaseString].location != NSNotFound) {
+                    interesting = YES;
+                    break;
+                }
+            }
+            if (!interesting) continue;
+
+            NSString *full = isDir ? [src stringByAppendingPathComponent:name] : src;
+            NSDictionary *attributes = [fm attributesOfItemAtPath:full error:nil];
+            if (!attributes) continue;
+            NSDate *modified = attributes[NSFileModificationDate];
+            if (modified && [modified compare:cutoff] == NSOrderedAscending) continue;
+
+            NSString *safe = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+            NSString *target = [dest stringByAppendingPathComponent:safe];
+            // 同名且已经完整拷贝过的就不重复拷，避免每次启动都堆一份。
+            NSDictionary *existing = [fm attributesOfItemAtPath:target error:nil];
+            if (existing &&
+                [existing[NSFileSize] unsignedLongLongValue] ==
+                    [attributes[NSFileSize] unsignedLongLongValue]) {
+                continue;
+            }
+            [fm removeItemAtPath:target error:nil];
+
+            NSError *copyError = nil;
+            if ([fm copyItemAtPath:full toPath:target error:&copyError]) {
+                unsigned long long size = [attributes[NSFileSize] unsignedLongLongValue];
+                totalBytes += size;
+                [found addObject:[NSString stringWithFormat:@"%@ (%@)",
+                                                            name, ds_human_size(size)]];
+            } else {
+                [found addObject:[NSString stringWithFormat:@"%@ (copy failed: %@)",
+                                                            name, copyError.localizedDescription]];
+            }
+        }
+    }
+
+    if (!found.count) {
+        ds_append_checkpoint(@"crash reports: none found "
+                             @"(no SpringBoard/backboardd/panic entries in the system log dirs)");
+        return;
+    }
+
+    // 只列最近 12 条，避免这一行本身把日志撑爆。
+    NSUInteger listed = MIN(found.count, (NSUInteger)12);
+    ds_append_checkpoint([NSString stringWithFormat:
+        @"crash reports: collected %lu (%@ total) -> Documents/DarkSpeedLogs/CrashReports/\n    %@%@",
+        (unsigned long)found.count,
+        ds_human_size(totalBytes),
+        [found subarrayWithRange:NSMakeRange(0, listed)]
+            componentsJoinedByString:@"\n    "],
+        found.count > listed
+            ? [NSString stringWithFormat:@"\n    ... and %lu more", (unsigned long)(found.count - listed)]
+            : @""]);
+}
+
+// 每个进程只做一轮，重复调用是空操作 —— 它是从多个入口（冷启动、启用悬浮窗、
+// 设置变更通知）调用的。
+static void ds_schedule_crash_report_collection(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // 第一次：本进程刚起来，能拿到上一次会话（含刚发生的重载）留下的报告。
+        ds_collect_crash_reports();
+        // 第二次：崩溃报告是异步回写的，重载刚发生过时可能还没落盘。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            @autoreleasepool { ds_collect_crash_reports(); }
+        });
+    });
+}
 
 static void ds_diag_configure(BOOL enabled) {
     g_diagEnabled.store(enabled);
@@ -356,10 +502,15 @@ static void ds_write_heartbeat_line(void) {
     rc_take_rpc_errors(&rpcWait, &rpcSecond, &rpcUnexpected, &rpcFaultEntry, &rpcReplyFailed);
 
     NSTimeInterval bgRemaining = UIApplication.sharedApplication.backgroundTimeRemaining;
-    // backgroundTimeRemaining 在前台时返回一个极大值，仅在后台时才有意义。
-    NSString *bgField = g_inBackground
-        ? [NSString stringWithFormat:@"bg=1 bgRemain=%.0fs", bgRemaining]
-        : @"bg=0";
+    // backgroundTimeRemaining 在前台时返回一个极大值（DBL_MAX），只有在后台并且确实
+    // 持有后台任务断言时才有意义。过去直接格式化会写出 DBL_MAX 这种几十位数字，既
+    // 没信息量又占日志，这里只在这个值真的可用时才输出。
+    BOOL bgRemainingUsable = g_inBackground && std::isfinite(bgRemaining) && bgRemaining < 1.0e9;
+    NSString *bgField = !g_inBackground
+        ? @"bg=0"
+        : (bgRemainingUsable
+            ? [NSString stringWithFormat:@"bg=1 bgRemain=%.0fs", bgRemaining]
+            : @"bg=1 bgRemain=n/a");
 
     NSString *line = [NSString stringWithFormat:
         @"%@  uptime=%.0fs hud=%d label=%d win=%d %@ rss=%.1fMB peakRss=%.1fMB"
@@ -763,6 +914,9 @@ void DSBridgeWarmUpNetworkAndPrefetchKernelCache(void) {
     // 「文件」App 里看到日志，前后台切换也有据可查。
     (void)ds_log_directory();
     ds_start_lifecycle_logging();
+    // 启动即尝试回收系统崩溃报告（内部按「详细日志」开关判断，且每个进程只跑一轮）。
+    // 关注的是上一次会话留下的 SpringBoard/backboardd/panic 记录。
+    ds_schedule_crash_report_collection();
     BOOL hasBuiltinOffsets = install_builtin_kernel_symbol_offsets();
     if (hasBuiltinOffsets || ds_has_symbol_offsets()) {
         g_kernelPrefetchState.store(2);
@@ -2109,6 +2263,7 @@ static void ds_finish_enable(void) {
     (void)ds_log_directory();
     ds_start_lifecycle_logging();
     ds_diag_configure(ds_pref_bool(ds_hud_preferences(), HUDUserDefaultsKeyDetailedLogging));
+    ds_schedule_crash_report_collection();
     g_dsRunning.store(true);
     g_dsProgress.store(0.0);
     ds_set_stage(ds_localized(@"Preparing startup"));
