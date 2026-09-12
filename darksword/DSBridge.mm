@@ -190,6 +190,7 @@ static void ds_diag_record(const char *message) {
 }
 
 static void ds_diag_flush(void);
+static void ds_write_heartbeat_line(void);
 
 static void ds_diag_configure(BOOL enabled) {
     g_diagEnabled.store(enabled);
@@ -245,6 +246,46 @@ static uint64_t g_remoteTextAttributes = 0;
 static uint64_t g_remoteSecureField = 0;
 static uint64_t g_remoteSecureCanvas = 0;
 static uint64_t g_remoteWindow = 0;
+
+// 高频心跳：专用于捕捉"应用被系统杀掉"这类没有任何收尾记录的消失。
+//
+// Runtime.log 每 30 秒才写一次，进程被 jetsam 回收或 watchdog 终止时，最后 30 秒的
+// 状态就丢了。这里改为每 10 秒覆盖写一行，体积恒定、I/O 可忽略，且包含内存占用 ——
+// 内存增长是判断 jetsam 的关键线索。
+static CFAbsoluteTime g_lastHeartbeat = 0;
+static const CFTimeInterval kDSHeartbeatInterval = 10.0;
+
+static CGFloat ds_resident_memory_mb(void) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return -1;
+    }
+    return (CGFloat)info.resident_size / (1024.0 * 1024.0);
+}
+
+static void ds_write_heartbeat_line(void) {
+    if (!g_diagEnabled.load()) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_lastHeartbeat > 0 && now - g_lastHeartbeat < kDSHeartbeatInterval) return;
+    g_lastHeartbeat = now;
+
+    NSString *dir = ds_log_directory();
+    if (!dir.length) return;
+    NSString *path = [dir stringByAppendingPathComponent:@"Heartbeat.log"];
+    NSString *line = [NSString stringWithFormat:
+        @"%@  uptime=%.0fs hud=%d label=%d win=%d rss=%.1fMB probes=%llu\n",
+        NSDate.date,
+        g_diagStart > 0 ? now - g_diagStart : 0,
+        g_hudActive.load() ? 1 : 0,
+        g_remoteLabel ? 1 : 0,
+        g_remoteWindow ? 1 : 0,
+        ds_resident_memory_mb(),
+        ({ uint64_t t=0,s=0,to=0,pf=0; rc_take_probe_stats(&t,&s,&to,&pf); t; })];
+    [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
 
 static NSString *ds_diag_snapshot(void) {
     NSMutableString *out = [NSMutableString string];
@@ -1660,6 +1701,7 @@ static void ds_update_rate(void) {
                                            reason:@"remote presentation update failed"
                                          userInfo:nil];
         }
+        ds_write_heartbeat_line();
         g_lastPresentationPreferences = [preferences copy];
         g_lastPresentationOrientation = orientation;
     } @catch (NSException *exception) {
