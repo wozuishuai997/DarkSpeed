@@ -1,12 +1,12 @@
 # DarkSpeed 开发、编译部署与整改说明
 
 整理日期：2026-09-12  
-文档基线：`1.0-7`，提交 `421cb77`  
+文档基线：`1.0-9`，提交 `d0aff7b`  
 适用分支：`codex/clock-top-positions`
 
 ## 1. 项目及当前交付状态
 
-DarkSpeed 是 iPhone 状态栏悬浮显示项目。本次在原有网速、FPS 功能上，增加时间显示、顶部位置、字体与背景设置、水平偏移、可配置刷新间隔，以及透明文字跟随系统状态栏颜色等功能。`1.0-7` 针对 **SpringBoard 在 `0x401` 地址崩溃** 做了专项修复，并在远程调用异常时改为跳过刷新（fail-closed）。
+DarkSpeed 是 iPhone 状态栏悬浮显示项目。本次在原有网速、FPS 功能上，增加时间显示、顶部位置、字体与背景设置、水平偏移、可配置刷新间隔，以及透明文字跟随系统状态栏颜色等功能。`1.0-9` 针对 **SpringBoard 在 `0x401` 地址崩溃** 做了专项修复，并在远程调用异常时改为跳过刷新（fail-closed）。
 
 | 项目 | 当前信息 |
 |---|---|
@@ -15,14 +15,14 @@ DarkSpeed 是 iPhone 状态栏悬浮显示项目。本次在原有网速、FPS �
 | 本地目录 | `C:\Users\Public\Git\DarkHumi` |
 | 实际使用设备 | iPhone 15 Pro，iOS 18.6.2，系统构建 22G100 |
 | 应用标识 | `com.huami.darkspeed` |
-| 当前版本号 / 构建号 | `1.0` / `7` |
-| 当前安装包 | [packages/DarkSpeed_1.0-7.ipa](packages/DarkSpeed_1.0-7.ipa) |
+| 当前版本号 / 构建号 | `1.0` / `9` |
+| 当前安装包 | [packages/DarkSpeed_1.0-9.ipa](packages/DarkSpeed_1.0-9.ipa) |
 | 安装方式 | 未签名 IPA，经用户使用 LCSign 签名后安装 |
 | 验证状态 | 云端编译、归档与安装包校验通过；`0x401` 崩溃修复**尚未经过实机回归** |
 
-**`1.0-7` 是崩溃修复的测试包，不能仅凭编译成功断言崩溃已消失。** 该修复依据五份崩溃日志的确定性证据定位并加固了相关代码路径，但结论仍需在 iOS 18.6.2 上实测确认。
+**`1.0-9` 是崩溃修复的测试包，不能仅凭编译成功断言崩溃已消失。** 该修复依据五份崩溃日志的确定性证据定位并加固了相关代码路径，但结论仍需在 iOS 18.6.2 上实测确认。
 
-本次核对时，原 `README.md` 和 `README_ZH.md` 已同步为 `1.0-7`。当前版本应以工程配置、安装包内 `Info.plist` 和本说明的基线为准。
+本次核对时，原 `README.md` 和 `README_ZH.md` 已同步为 `1.0-9`。当前版本应以工程配置、安装包内 `Info.plist` 和本说明的基线为准。
 
 
 ## 2. 代码结构与维护入口
@@ -123,7 +123,11 @@ DarkSpeed 是 iPhone 状态栏悬浮显示项目。本次在原有网速、FPS �
 | 1.0-6 | `e873cd4` | 透明文字跟随系统右侧状态栏黑白样式，描边反色 |
 | 1.0-7 | `421cb77` | 修复 SpringBoard 在 `0x401` 标记地址崩溃；远程调用失败时改为跳过刷新 |
 
-### 4.1 `0x401` 崩溃的分析结论与修复（1.0-7）
+### 4.1 SpringBoard 崩溃的分析结论与修复（1.0-7 → 1.0-9）
+
+本问题共有**两种**崩溃形态，第二种才是「开启悬浮窗即崩」的直接原因，由 1.0-7 的实机日志 `SpringBoard-2026-09-12-083831.ips` 定位。
+
+#### 形态一：`0x401` 上的 SIGBUS（`1.0-7` 起加固）
 
 五份崩溃日志（`SpringBoard-2026-09-11-204251 / 212213 / 220219 / 225431 / 232558.ips`）是**同一个故障**：
 
@@ -145,15 +149,46 @@ esr         : 0x8a000000   （指令取指翻译错误）
 
 即：**一个原始哨兵值被写进了活动线程的可执行地址**，线程第一次取指即在未映射的 `0x401` 上中止，而该线程当时并不属于任何异常端口，于是整个 SpringBoard 被终止（`termination.byProc = "exc handler"`）。
 
-已加固的三条产生路径：
+加固内容：
 
-1. **PAC 探测线程的异常端口被过早销毁**（`pac.m`）。每次 `remotepac()` 都新建一个端口，并在 100 ms 等待返回后立刻 `mach_port_destruct`。若该线程的中止在窗口之后才投递，线程就再无异常端口可投递，中止直接杀死目标进程。现在探测端口放入**永不释放的端口环**，等待改为 3 秒 × 3 轮，并在恢复线程前**核验端口确实已记录到该线程**，失败则一律 `return 0`。
+1. **PAC 探测线程的异常端口被过早销毁**（`pac.m`）。每次 `remotepac()` 都新建一个端口，并在 100 ms 等待返回后立刻 `mach_port_destruct`。若该线程的中止在窗口之后才投递，线程就再无异常端口可投递，中止直接杀死目标进程。现在探测端口放入**永不释放的端口环**，等待改为 3 秒 × 3 轮，失败一律 `return 0`。
 2. **原始哨兵值被当成新线程的启动例程**（`RemoteCall.m`）。`remotepac()` 的结果直接交给 `pthread_create_suspended_np`；内核无法认证启动例程时会把它降级为裸值，线程随即在 `0x101/0x201/0x301/0x401` 上中止。现在低于页大小的启动例程会被**拒绝并要求重新初始化**。
-3. **`signState()` 接受了不可用的签名**（`RemoteCall.m`）。探测结果若去掉 PAC 位后仍等于原值，说明签名不可用，旧代码却把它当作程序计数器写入。现在回退为原始指针，由远程调用层继续持有线程状态。
 
-**fail-closed 行为（本次新增）**：`RemoteCall` 增加 `isHealthy` 健康标志，遇到意外陷阱、线程状态恢复失败、函数入口故障等情况即锁存为不可用。桥接层在每次刷新前检查该标志，一旦不可用就**停止一切远程调用**，界面显示「为保护 SpringBoard，已停止 HUD 刷新：…」。
+#### 形态二：主线程上的 PAC_EXCEPTION（`1.0-9` 修复，开启悬浮窗即崩的直接原因）
 
-这意味着：**刷新可能停止，但 SpringBoard 不会被这个路径打崩。** 看到该文案属于预期保护行为，不是新故障；此时应提供 `DSBridge.log` 中 `HUD refresh suspended:` 相关行以便定位。
+`SpringBoard-2026-09-12-083831.ips`（1.0-7 实机）：
+
+```text
+exception      : EXC_BAD_ACCESS / SIGKILL
+subtype        : EXC_ARM_DA_ALIGN at 0x2000000000000101 -> 0x0000000000000101
+                 (possible pointer authentication failure)
+termination    : namespace = PAC_EXCEPTION, code = 257
+faultingThread : 0   ← SpringBoard 主线程，栈在 __CFRunLoopRun 里
+pc             : 0x101               = FAKE_PC_TROJAN_CREATOR
+lr             : 0x2000000000000201  = FAKE_LR_TROJAN_CREATOR
+```
+
+`0x101`/`0x201` 正是 RemoteCall 初始化时**第一次回复**所用的停车标记（`parkState: pc=firstThreadParkTrap lr=_firstThreadReturnTrap`）。根因链条：
+
+1. `remotepac()` 无法为该线程产生可用签名，`signState()` 旧逻辑**回退写入裸指针** `0x101`。
+2. 调用方仍然照常 `statereply()` 把状态交回内核。
+3. 内核在异常返回时直接恢复该线程，**拒绝未正确签名的标记 PC**，以 `PAC_EXCEPTION` 杀死整个 SpringBoard —— 而这条线程是主线程，所以表现为“开启悬浮窗就崩”。
+
+修复：
+
+- `signState()` 改为返回 `BOOL`，**不再回退裸 PC**，而是明确报告该 PC 无法签名。
+- 所有可能携带标记 PC 的回复点，在签名失败时**一律拒绝回复**，把线程留在内核异常里（这是无害的挂起，不是崩溃）：两条初始化停车路径、`doRemoteCallInternalTimeout`、`doRemoteCallWithPendingException`、函数入口停车、临时陷阱恢复、`restoreTrojanThreadWithState`、主线程恢复。
+- 结果：探测失败只导致**启用失败**，不再导致进程死亡。
+- `pac.m` 撤掉了对异常动作的额外内核回读校验。该校验一旦出现假阴性就会否掉每一次签名，直接导致初始化失败（实机表现为「SpringBoard 连接失败：RemoteCall init failed」），本身也是裸标记回退的来源。`thread_set_exception_ports` 返回成功即为权威依据，且端口环永不释放，`0x401` 中止始终有服务者。
+
+**fail-closed 行为**：`RemoteCall` 增加 `isHealthy` 健康标志，遇到意外陷阱、线程状态恢复失败、函数入口故障等情况即锁存为不可用。
+
+`1.0-9` 进一步把这道闸门前移到**最底层**并覆盖**创建阶段**：
+
+- 所有底层远程调用辅助函数（`ds_remote_sel`、`ds_remote_class`、`ds_remote_create_string`、`ds_perform_on_springboard_main`）统一经过 `ds_remote_process_usable()` 判断，新增调用点无法绕过闸门。
+- 连接在 `RemoteCall` 校验通过后、`ds_create_springboard_hud()` **之前**就注册为活动连接。1.0-7 只在创建成功后才注册，导致创建阶段（数百次远程调用、每次都产生 PAC 探测）完全不受闸门保护——连接若在创建中途变坏，仍会被继续驱动，而每一次多余调用都是把线程送向 `0x401` 的机会。
+
+一旦闸门关闭，界面显示「为保护 SpringBoard，已停止 HUD 刷新：…」并停止一切远程调用。**刷新可能停止，但 SpringBoard 不会被这个路径打崩。** 看到该文案属于预期保护行为，不是新故障；此时应提供 `DSBridge.log` 中 `HUD refresh suspended:` 相关行以便定位。
 
 ### 4.2 “点了没有反应，点另一个才刷新”
 
@@ -181,7 +216,7 @@ esr         : 0x8a000000   （指令取指翻译错误）
 - 这些日志记录的直接退出原因不是普通内存不足终止；也没有证明硬件已损坏。
 - 用户确认 `1.0-1`、`1.0-2` 都出现过，且息屏时也可能发生，没有固定操作触发条件。
 
-`1.0-7` 已针对该路径实施 4.1 所述加固，并新增 fail-closed 行为：远程调用异常时跳过刷新，而不是继续驱动可能已损坏的线程。
+`1.0-9` 已针对该路径实施 4.1 所述加固，并新增 fail-closed 行为：远程调用异常时跳过刷新，而不是继续驱动可能已损坏的线程。
 
 仍未确认或仍待验证的事项：
 
@@ -285,10 +320,10 @@ packages/DarkSpeed_1.0-6.ipa
 
 ### 8.1 已完成的验证
 
-- 1.0-1～1.0-7 已生成测试 IPA；历次云端构建记录显示编译归档成功。
-- 1.0-7 的云端构建 `Build Test IPA` 运行 #8（run `34662060600`，提交 `421cb77`）四步全部成功：Checkout / Set up Xcode / Build IPA / Upload IPA。
-- 1.0-7 修改的源文件未产生新的编译警告；这不表示仓库所有第三方源码没有警告（`sources/SPLarkController/*` 仍有既有弃用警告）。
-- 已检查 1.0-7 附件的 SHA-256、应用标识、版本号、构建号，并确认本次七处修复字符串确实编译进主二进制。
+- 1.0-1～1.0-9 已生成测试 IPA；历次云端构建记录显示编译归档成功。
+- 1.0-9 的云端构建 `Build Test IPA` 运行 #10（run `34662549118`，提交 `d0aff7b`）四步全部成功：Checkout / Set up Xcode / Build IPA / Upload IPA。（1.0-8 为运行 #9，run `34662277913`，提交 `00fbd4d`；1.0-7 为运行 #8，run `34662060600`，提交 `421cb77`，同样全部成功。）
+- 1.0-9 修改的源文件未产生新的编译警告；这不表示仓库所有第三方源码没有警告（`sources/SPLarkController/*` 仍有既有弃用警告）。
+- 已检查 1.0-9 附件的 SHA-256、应用标识、版本号、构建号，并确认八处修复字符串编译进主二进制、且已撤掉的内核回读校验字符串确实不存在。
 - 已确认主二进制为 arm64e（`cpusubtype 0x0100000c`），与 PAC 路径和 iPhone 15 Pro 匹配。
 - 当前代码、构建配置和本地安装包版本已核对。
 
@@ -296,6 +331,7 @@ packages/DarkSpeed_1.0-6.ipa
 
 | 场景 | 应观察的结果 |
 |---|---|
+| **开启悬浮窗（1.0-6 的必崩场景）** | **本次首要验收项**：开关悬浮窗多次，SpringBoard 不应再出现黑屏转圈 |
 | 四种显示模式循环 | 模式正确，时间与系统一致 |
 | 12/24 小时制与时区变化 | 下一次刷新后使用系统格式 |
 | 字号 8、16、24 | 无裁切、异常换行或明显描边黑点 |
@@ -306,46 +342,48 @@ packages/DarkSpeed_1.0-6.ipa
 | 间隔 1、5、30 秒 | 自动刷新节奏改变，网速/FPS 不按累计时长成倍放大 |
 | 修改设置、锁屏、解锁 | 可以额外即时更新，不应误判为间隔设置无效 |
 | 视频进入/退出横屏 | 按当前周期检测方向并执行隐藏/显示；不按即时刷新验收 |
-| 连续使用及息屏 | **本次重点**：记录是否再次发生黑屏转圈；未完成前不能宣称崩溃已解决 |
+| 连续使用及息屏 | 记录是否再次发生黑屏转圈；未完成前不能宣称崩溃已解决 |
 | 出现「为保护 SpringBoard，已停止 HUD 刷新」 | 属预期 fail-closed 行为。记录该文案及 `DSBridge.log` 中 `HUD refresh suspended:` 行，用于定位是哪个远程调用异常 |
 
 排查显示问题时记录：安装版本、显示模式、字号、加粗、背景、偏移、刷新间隔、发生场景及截图。排查崩溃时保留原始 `.ips` 和发生时间。提交外部报告前检查日志中的设备标识等隐私信息。
 
 ## 9. 当前安装包校验值
 
-`packages/DarkSpeed_1.0-7.ipa`，968437 字节：
+`packages/DarkSpeed_1.0-9.ipa`，968784 字节：
 
 ```text
 SHA256
-09c9e17bdb2d041bfbe39f1c59aa68735017472d12f395528315b6846c8d316c
+a10e9aacd0e59d9c71e0ebdf99231e4cf5ce3fd9298e7791025aed839b4f03a9
 ```
 
-对应 Actions 附件 `DarkSpeed-test-8.zip`（963395 字节）：
+对应 Actions 附件 `DarkSpeed-test-10.zip`（963841 字节）：
 
 ```text
 SHA256
-3d0ae9dbaa33ed012d72d287db33fdf06c6543360d7a888d9fbd07aa104f75ca
+3fd4a152a7aff74040ffc810e493b43892e0f2a9adf335959fd0d279612248ff
 ```
 
-包内 `Info.plist` 已核验：`CFBundleIdentifier = com.huami.darkspeed`、`CFBundleVersion = 7`、`CFBundleShortVersionString = 1.0`。
+包内 `Info.plist` 已核验：`CFBundleIdentifier = com.huami.darkspeed`、`CFBundleVersion = 9`、`CFBundleShortVersionString = 1.0`。
+
+早期版本不要用于验证本问题：1.0-7 会在 PAC 签名失败时把裸标记回复给内核（主线程 PAC_EXCEPTION），1.0-8 缺少创建阶段的闸门。请直接使用 1.0-9。
 
 Windows 校验示例，在仓库根目录的 PowerShell 7 中执行：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath './packages/DarkSpeed_1.0-7.ipa'
+Get-FileHash -Algorithm SHA256 -LiteralPath './packages/DarkSpeed_1.0-9.ipa'
 ```
 
 macOS 校验示例：
 
 ```sh
-shasum -a 256 packages/DarkSpeed_1.0-6.ipa
+shasum -a 256 packages/DarkSpeed_1.0-9.ipa
 ```
 
 LCSign 重新签名会改变 IPA 内容，签名后的哈希不同属于正常现象；上述值用于验证签名前的本次交付文件。重新构建相同源码也不保证得到逐字节相同的安装包。
 
 ## 10. 后续维护重点
 
-1. **优先验证 `0x401` 崩溃是否消失**：在 iOS 18.6.2 上连续使用并覆盖息屏场景，保留新的 `.ips`（如有）。`1.0-7` 的加固只在代码层面完成，尚缺实机证据。
+1. **优先验证“开启悬浮窗”这一必崩场景**：1.0-6 下开启悬浮窗即导致 SpringBoard 崩溃；1.0-9 已修掉直接原因（内核拒绝未签名的标记 PC），应已消除。请在 iOS 18.6.2 上反复开关悬浮窗并保留新的 `.ips`（如有）。该加固只在代码层面完成，尚缺实机证据。
 2. 若再次出现黑屏转圈，先比对故障地址：仍是 `0x401`（或 `0x101/0x201/0x301`）说明还有未覆盖的裸哨兵值写入路径；换到其他地址则属于新的问题类别。
 3. 优先补齐 iOS 18.6.2 上的显示及颜色跟随实测记录。
 4. 记录 fail-closed 是否被触发：出现「为保护 SpringBoard，已停止 HUD 刷新」时，收集 `DSBridge.log` 中 `HUD refresh suspended:` 行，定位具体失败的远程调用。
@@ -354,6 +392,6 @@ LCSign 重新签名会改变 IPA 内容，签名后的哈希不同属于正常�
 7. 后续正式交付前同步更新 README 版本与验证边界，并保存新包校验值。
 8. 每次更新本说明时写明源码提交、构建号、实际构建记录和实机验证状态。
 
-本说明是开发交接文档。`1.0-7` 的代码修复与云端构建已完成，实机验证仍待用户执行。
+本说明是开发交接文档。`1.0-9` 的代码修复与云端构建已完成，实机验证仍待用户执行。
 
 > 推送提示：本机到 `github.com` 的 git 协议会被 DNS 污染与连接重置阻断，需为 git 指定可用代理（本机验证可用 `http://127.0.0.1:10809`）才能推送并触发 `Build Test IPA`。
