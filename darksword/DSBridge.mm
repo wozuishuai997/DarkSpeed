@@ -114,6 +114,44 @@ static void ds_append_checkpoint(NSString *message) {
 }
 
 #if USE_DARKSWORD
+static void ds_set_stage(NSString *stage) {
+    NSString *next = [stage copy] ?: @"";
+    os_unfair_lock_lock(&g_errorLock);
+    g_dsStage = next;
+    os_unfair_lock_unlock(&g_errorLock);
+    os_log(OS_LOG_DEFAULT, "[DSBridge] stage: %{public}@", next);
+    ds_append_checkpoint(next);
+    ds_post_progress();
+}
+#endif
+
+static void ds_set_error(NSString *message) {
+    NSString *next = [message copy] ?: @"";
+    os_unfair_lock_lock(&g_errorLock);
+    g_dsLastError = next;
+    os_unfair_lock_unlock(&g_errorLock);
+    if (next.length > 0) {
+        os_log_error(OS_LOG_DEFAULT, "[DSBridge] %{public}@", next);
+        ds_append_checkpoint([ds_localized(@"Error: ") stringByAppendingString:next]);
+        notify_post(NOTIFY_RELOAD_APP);
+    }
+    ds_post_progress();
+}
+
+#if USE_DARKSWORD
+
+#import "DSRemoteCall.h"
+
+// These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
+extern "C" {
+#import "darksword.h"
+#import "offsets.h"
+#import "utils.h"
+}
+
+static void ds_rotate_log_if_needed(NSString *path, unsigned long long incoming);
+static NSString *ds_log_directory(void);
+static void ds_append_checkpoint(NSString *message);
 // ---------------------------------------------------------------------------
 // 运行时诊断日志
 //
@@ -183,40 +221,6 @@ static void ds_diag_configure(BOOL enabled) {
     }
 }
 
-static void ds_set_stage(NSString *stage) {
-    NSString *next = [stage copy] ?: @"";
-    os_unfair_lock_lock(&g_errorLock);
-    g_dsStage = next;
-    os_unfair_lock_unlock(&g_errorLock);
-    os_log(OS_LOG_DEFAULT, "[DSBridge] stage: %{public}@", next);
-    ds_append_checkpoint(next);
-    ds_post_progress();
-}
-#endif
-
-static void ds_set_error(NSString *message) {
-    NSString *next = [message copy] ?: @"";
-    os_unfair_lock_lock(&g_errorLock);
-    g_dsLastError = next;
-    os_unfair_lock_unlock(&g_errorLock);
-    if (next.length > 0) {
-        os_log_error(OS_LOG_DEFAULT, "[DSBridge] %{public}@", next);
-        ds_append_checkpoint([ds_localized(@"Error: ") stringByAppendingString:next]);
-        notify_post(NOTIFY_RELOAD_APP);
-    }
-    ds_post_progress();
-}
-
-#if USE_DARKSWORD
-
-#import "DSRemoteCall.h"
-
-// These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
-extern "C" {
-#import "darksword.h"
-#import "offsets.h"
-#import "utils.h"
-}
 
 static const NSInteger kDSSpringBoardHUDTag = 0x54534844; // "TSHD"
 static const CGFloat kDSHUDMinFontSize = 9.0;
