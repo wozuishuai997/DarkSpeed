@@ -203,6 +203,30 @@ static void ds_request_full_reassert(const char *why);
 // 见 ds_write_heartbeat_line 里的说明：失败分支会把被注入线程留在标记地址上。
 static std::atomic_bool g_rpcHealthLost(false);
 
+// 记录当前是否在后台。在这里声明是因为日志与心跳都要用，而生命周期观察者到文件更
+// 靠后的位置才写它。
+static volatile BOOL g_inBackground = NO;
+
+// 屏幕是否处于锁定状态。锁屏期间一律不发远程调用，理由见下面。
+static volatile BOOL g_screenLocked = NO;
+
+// 远程刷新是否被暂停。
+//
+// 每次远程调用都会把 SpringBoard 里那条被注入线程放到标记地址上等回复，回来再放它继续
+// 跑。这个来回每秒发生若干次，只要有一次两侧对不上，线程就在未映射且不对齐的 0x401 上
+// 取指，SpringBoard 当场 SIGBUS —— 四份崩溃报告都是这个签名。
+//
+// **只按锁屏判定，不按前后台判定。**
+// 四份报告里 isLocked 全是 1、procRole 全是 Foreground：设备锁屏时 SpringBoard 正在重组
+// 它自己的锁屏场景，而我们的注入线程恰好也在同一时刻被反复停放/放行。这是唯一同时出现
+// 在所有崩溃里的状态。
+//
+// 反过来，应用在后台而屏幕亮着时悬浮窗正是用户在看的，那时必须继续刷新 —— 把后台也一起
+// 停掉会把正常使用中的显示冻住，那是过度修复。
+static BOOL ds_remote_calls_paused(void) {
+    return g_screenLocked ? YES : NO;
+}
+
 // ---------------------------------------------------------------------------
 // 崩溃报告回收
 //
@@ -483,7 +507,7 @@ static CGFloat ds_resident_memory_mb(void) {
 
 // 记录当前是否在后台，以及系统还允许多少后台时间。
 // 后台运行时间用尽被终止，是"应用在后台消失"最常见的系统侧原因。
-static volatile BOOL g_inBackground = NO;
+// 变量本体已在文件上方声明（ds_remote_calls_paused 需要它）。
 
 // 应用生命周期观察者。
 //
@@ -510,7 +534,8 @@ static void ds_start_lifecycle_logging(void) {
             g_inBackground = YES;
             NSTimeInterval remaining = UIApplication.sharedApplication.backgroundTimeRemaining;
             ds_append_checkpoint([NSString stringWithFormat:
-                @"lifecycle: entered BACKGROUND (bgTimeRemaining=%.0fs)", remaining]);
+                @"lifecycle: entered BACKGROUND - remote HUD updates paused (bgTimeRemaining=%.0fs)",
+                remaining]);
             // 进后台立刻落一次心跳，记录进入后台那一刻的内存与状态。
             g_lastHeartbeat = 0;
             ds_write_heartbeat_line();
@@ -518,7 +543,7 @@ static void ds_start_lifecycle_logging(void) {
         ds_observe_lifecycle(UIApplicationWillEnterForegroundNotification, ^(NSNotification *note) {
             (void)note;
             g_inBackground = NO;
-            ds_append_checkpoint(@"lifecycle: will enter FOREGROUND");
+            ds_append_checkpoint(@"lifecycle: will enter FOREGROUND - remote HUD updates resume");
             // 回到前台是"悬浮窗卡住"最可靠的恢复时机：让下一次刷新把整套状态重下一遍。
             ds_request_full_reassert("app returned to foreground");
             g_lastHeartbeat = 0;
@@ -2071,6 +2096,8 @@ static void ds_update_rate(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard || !g_remoteLabel) return;
     // 硬闸门：RPC 层报过失败之后绝不再发远程调用。见 g_rpcHealthLost 的说明。
     if (g_rpcHealthLost.load()) return;
+    // 锁屏或后台期间不发远程调用。见 ds_remote_calls_paused 的说明。
+    if (ds_remote_calls_paused()) return;
 
     uint64_t input = 0;
     uint64_t output = 0;
@@ -2198,22 +2225,31 @@ static void ds_register_hud_notifications(void) {
         BOOL passcodeSet = NO;
         SBGetScreenLockStatus(port, &locked, &passcodeSet);
         (void)passcodeSet;
-        if (!g_hudActive.load() || !g_springBoard || !g_remoteWindow) return;
 
-        // Keep the SpringBoard-hosted HUD above CoverSheet while locked.
-        // Reapply the level during the transition because SpringBoard may
-        // reorder its own windows as the lock scene becomes active.
-        ds_remote_set_double_on_main(g_springBoard, g_remoteWindow,
-                                     "setWindowLevel:", kDSHUDWindowLevel);
+        // 锁屏状态变化时**一个远程调用都不发**。
+        //
+        // 这里以前会重新下发窗口层级、再读一次 isHidden、最后整帧刷新一遍 —— 也就是
+        // 在 SpringBoard 正在重组锁屏场景的同时，恰好往它里面注入三次远程调用。
+        // 四份崩溃报告全部符合这个场景：设备处于锁定/后台状态，SpringBoard procRole
+        // 仍是 Foreground（正因如此它在重组场景），随后我们那条被注入线程在 0x401 上
+        // 取指、SIGBUS。
+        //
+        // 锁屏期间屏幕本来也不会被注视，这些调用没有收益，只有风险。解锁时统一重来一遍。
+        BOOL wasLocked = g_screenLocked;
+        g_screenLocked = locked;
+        if (locked == wasLocked) return;
+        ds_append_checkpoint(locked
+            ? @"screen locked: pausing remote HUD updates"
+            : @"screen unlocked: resuming remote HUD updates");
         if (!locked) {
             g_previousInput = 0;
             g_previousOutput = 0;
             g_previousSampleTime = 0;
             g_needsFPSBaselineReset = YES;
             g_focusUntil = CFAbsoluteTimeGetCurrent() + kDSHUDFocusDuration;
+            // 解锁后把整套状态重下一次，补上锁屏期间跳过的所有更新。
+            ds_request_full_reassert("screen unlocked");
         }
-        g_lastWindowHidden = ds_remote_get_u64_on_main(g_springBoard, g_remoteWindow, "isHidden") != 0;
-        ds_update_rate();
     });
 }
 
