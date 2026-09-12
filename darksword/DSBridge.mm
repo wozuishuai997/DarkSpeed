@@ -1179,17 +1179,78 @@ static BOOL ds_status_bar_read_polarity_in_process(RemoteCall *process, BOOL *de
         if (pathOut) *pathOut = @"no-uiapplication";
         return NO;
     }
-    uint64_t scene = ds_remote_get_retained_object_on_main(
-        process, application, "mainWindowScene", NULL, 0);
-    if (!scene) {
-        if (pathOut) *pathOut = @"no-mainwindowscene";
-        return NO;
+    // SpringBoard 没有 mainWindowScene（它不是单 scene 的普通应用），必须自己找 scene。
+    // 实测日志：mainWindowScene 返回 nil，读取链在此中断。
+    uint64_t scene = 0;
+    NSString *sceneSource = @"none";
+    uint64_t manager = 0;
+
+    // 首选：遍历 connectedScenes，取第一个带 window 的 UIWindowScene。
+    uint64_t scenes = ds_remote_get_object_on_main(process, application, "connectedScenes");
+    if (scenes) {
+        uint64_t count = ds_remote_get_u64_on_main(process, scenes, "count");
+        count = MIN(count, 8);
+        for (uint64_t index = 0; index < count && !manager; index++) {
+            DSRemoteArgument argument = { &index, sizeof(index) };
+            uint64_t candidate = 0;
+            if (!ds_remote_invoke_on_main_result(
+                    process, scenes, ds_remote_sel(process, "objectAtIndex:"),
+                    &argument, 1, &candidate, sizeof(candidate)) || !candidate) {
+                continue;
+            }
+            uint64_t candidateManager = ds_remote_get_object_on_main(
+                process, candidate, "statusBarManager");
+            if (!candidateManager) continue;
+            scene = candidate;
+            manager = candidateManager;
+            sceneSource = [NSString stringWithFormat:@"connectedScenes[%llu]", index];
+        }
     }
 
-    uint64_t manager = ds_remote_get_object_on_main(process, scene, "statusBarManager");
+    // 兜底 1：mainWindowScene（普通应用可用）。
     if (!manager) {
-        ds_remote_release(process, scene);
-        if (pathOut) *pathOut = @"no-statusbarmanager";
+        uint64_t mainScene = ds_remote_get_retained_object_on_main(
+            process, application, "mainWindowScene", NULL, 0);
+        if (mainScene) {
+            manager = ds_remote_get_object_on_main(process, mainScene, "statusBarManager");
+            if (manager) {
+                scene = mainScene;
+                sceneSource = @"mainWindowScene";
+            } else {
+                ds_remote_release(process, mainScene);
+            }
+        }
+    }
+
+    // 兜底 2：SpringBoard 自己的 scene 管理器。
+    if (!manager) {
+        uint64_t sbSceneClass = ds_remote_class(process, "SBWindowScene");
+        uint64_t workspaceClass = ds_remote_class(process, "SBMainWorkspace");
+        uint64_t workspace = workspaceClass
+            ? ds_remote_get_object_on_main(process, workspaceClass, "sharedInstance")
+            : 0;
+        uint64_t sbScene = 0;
+        if (workspace) {
+            sbScene = ds_remote_get_retained_object_on_main(
+                process, workspace, "mainWindowScene", NULL, 0);
+        }
+        if (!sbScene && sbSceneClass) {
+            sbScene = ds_remote_get_retained_object_on_main(
+                process, sbSceneClass, "mainScreenScene", NULL, 0);
+        }
+        if (sbScene) {
+            manager = ds_remote_get_object_on_main(process, sbScene, "statusBarManager");
+            if (manager) {
+                scene = sbScene;
+                sceneSource = @"SBWindowScene";
+            } else {
+                ds_remote_release(process, sbScene);
+            }
+        }
+    }
+
+    if (!manager) {
+        if (pathOut) *pathOut = @"no-scene-with-statusbarmanager";
         return NO;
     }
 
@@ -1238,7 +1299,8 @@ static BOOL ds_status_bar_read_polarity_in_process(RemoteCall *process, BOOL *de
     }
 
     ds_remote_release(process, scene);
-    if (pathOut) *pathOut = used;
+    // 报告里带上 scene 来源，便于确认走的是哪条入口。
+    if (pathOut) *pathOut = [NSString stringWithFormat:@"%@/%@", sceneSource, used];
     if (decidedOut) *decidedOut = decided;
     return dark;
 }
