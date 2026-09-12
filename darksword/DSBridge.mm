@@ -1116,85 +1116,151 @@ static void ds_remote_release(RemoteCall *process, uint64_t object) {
     remote_msg(process, object, ds_remote_sel(process, "release"), 0, 0, 0, 0);
 }
 
-// 读取内置屏幕右侧状态栏（Wi-Fi／移动信号／电池）实际使用的文字极性，让悬浮窗像这些
-// 系统图标一样自动反色，而不是按 DarkSpeed 自己的外观推断。
+// 从单个样式请求对象解析文字极性。返回 NO 表示该对象给不出结论。
+static BOOL ds_polarity_from_request(RemoteCall *process, uint64_t request, uint64_t *styleOut) {
+    if (styleOut) *styleOut = UINT64_MAX;
+    if (!request) return NO;
+
+    uint64_t style = ds_remote_get_u64_on_main(process, request, "style");
+    if (styleOut) *styleOut = style;
+    // LightContent 表示系统正在画浅色图标（深色底）→ 悬浮窗也用浅色文字。
+    if (style == UIStatusBarStyleLightContent) return NO;
+    if (style == UIStatusBarStyleDefault || style == UIStatusBarStyleDarkContent) return YES;
+
+    // style 不足以判断（系统壁纸可覆盖前景色）时读实际颜色分量。
+    uint64_t color = ds_remote_get_object_on_main(process, request, "textColor");
+    if (!color) color = ds_remote_get_object_on_main(process, request, "foregroundColor");
+    if (!color) return NO;
+
+    uint64_t cgColor = ds_remote_get_retained_object_on_main(
+        process, color, "CGColor", NULL, 0);
+    if (!cgColor) return NO;
+
+    uint64_t components = ds_remote_get_u64_on_main(process, cgColor, "components");
+    double red = 0;
+    BOOL ok = components && [process remoteRead:components to:&red size:sizeof(double)];
+    ds_remote_release(process, cgColor);
+    if (!ok) return NO;
+    return red < 0.5;
+}
+
+// 依次尝试多个入口，任一成功即返回，并记录命中的是哪一个。
 //
-// 入口取自 iOS 18.x 的 SBWindowSceneStatusBarManager。这里刻意沿用 1.0-6 已验证的调用
-// 序列，只补上缺失的对象生命周期管理：performSelectorOnMainThread: 每次都是一次独立的
-// main-thread turn，其自动释放池随即排干，因此每个中间对象都必须先 retain、用完 release，
-// 否则下一步拿到的是野指针（1.0-5 已在颜色工厂方法上踩过同样的 SIGBUS）。
-static BOOL ds_status_bar_read_polarity_in_process(RemoteCall *process, BOOL *decidedOut) {
+// iOS 17 起状态栏由 Swift 重写，`statusBarManager`/`trailingStatusBarStyleRequest`
+// 在不同小版本上不一定存在，单一路径读不到就等于整功能失效。因此这里穷举并留日志，
+// 便于用 DSBridge.log 定位，而不是反复猜。
+static BOOL ds_status_bar_read_polarity_in_process(RemoteCall *process, BOOL *decidedOut,
+                                                   NSString **pathOut) {
     if (decidedOut) *decidedOut = NO;
+    if (pathOut) *pathOut = @"none";
+
     uint64_t application = ds_remote_get_object_on_main(
         process, ds_remote_class(process, "UIApplication"), "sharedApplication");
-    if (!application) return NO;
-
+    if (!application) {
+        if (pathOut) *pathOut = @"no-uiapplication";
+        return NO;
+    }
     uint64_t scene = ds_remote_get_retained_object_on_main(
         process, application, "mainWindowScene", NULL, 0);
-    if (!scene) return NO;
+    if (!scene) {
+        if (pathOut) *pathOut = @"no-mainwindowscene";
+        return NO;
+    }
 
     uint64_t manager = ds_remote_get_object_on_main(process, scene, "statusBarManager");
     if (!manager) {
         ds_remote_release(process, scene);
+        if (pathOut) *pathOut = @"no-statusbarmanager";
         return NO;
     }
 
-    // 右侧（Wi-Fi／信号／电池）优先；取不到再退回聚合样式请求。
+    BOOL decided = NO;
+    BOOL dark = NO;
+    uint64_t style = UINT64_MAX;
+    NSString *used = @"none";
+
+    // 入口 1：右侧（Wi-Fi／信号／电池）样式请求。
     uint64_t request = ds_remote_get_retained_object_on_main(
         process, manager, "trailingStatusBarStyleRequest", NULL, 0);
-    if (!request) {
+    if (request) {
+        dark = ds_polarity_from_request(process, request, &style);
+        used = [NSString stringWithFormat:@"trailing(style=%llu)", style];
+        decided = YES;
+        ds_remote_release(process, request);
+    }
+
+    // 入口 2：聚合样式请求。
+    if (!decided) {
         request = ds_remote_get_retained_object_on_main(
             process, manager, "currentAggregatedStyleRequest", NULL, 0);
-    }
-    if (!request) {
-        ds_remote_release(process, scene);
-        return NO;
-    }
-
-    BOOL dark = NO;
-    BOOL decided = NO;
-    uint64_t style = ds_remote_get_u64_on_main(process, request, "style");
-    if (style == UIStatusBarStyleLightContent) {
-        // 系统正在画浅色图标（即深色底），悬浮窗同样用浅色文字。
-        dark = NO;
-        decided = YES;
-    } else if (style == UIStatusBarStyleDefault || style == UIStatusBarStyleDarkContent) {
-        dark = YES;
-        decided = YES;
-    }
-
-    if (!decided) {
-        // 系统壁纸可覆盖前景色，此时 style 不足以判断，读实际颜色分量。
-        uint64_t color = ds_remote_get_object_on_main(process, request, "textColor");
-        if (!color) color = ds_remote_get_object_on_main(process, request, "foregroundColor");
-        if (color) {
-            uint64_t cgColor = ds_remote_get_retained_object_on_main(
-                process, color, "CGColor", NULL, 0);
-            if (cgColor) {
-                uint64_t components = ds_remote_get_u64_on_main(process, cgColor, "components");
-                double red = 0;
-                if (components && [process remoteRead:components to:&red size:sizeof(double)]) {
-                    dark = red < 0.5;
-                    decided = YES;
-                }
-                ds_remote_release(process, cgColor);
-            }
+        if (request) {
+            dark = ds_polarity_from_request(process, request, &style);
+            used = [NSString stringWithFormat:@"aggregated(style=%llu)", style];
+            decided = YES;
+            ds_remote_release(process, request);
         }
     }
 
-    ds_remote_release(process, request);
+    // 入口 3：状态栏宿主视图自身。
+    if (!decided) {
+        uint64_t statusBar = ds_remote_get_object_on_main(process, manager, "statusBar");
+        uint64_t inner = statusBar
+            ? ds_remote_get_retained_object_on_main(
+                  process, statusBar, "currentAggregatedStyleRequest", NULL, 0)
+            : 0;
+        if (inner) {
+            dark = ds_polarity_from_request(process, inner, &style);
+            used = [NSString stringWithFormat:@"statusBar(style=%llu)", style];
+            decided = YES;
+            ds_remote_release(process, inner);
+        } else if (statusBar) {
+            used = @"statusBar-no-request";
+        }
+    }
+
     ds_remote_release(process, scene);
+    if (pathOut) *pathOut = used;
     if (decidedOut) *decidedOut = decided;
     return dark;
 }
 
+// 解析结果缓存，避免每次刷新都跑完整条远端读取链。
+static BOOL g_statusBarPolarity = NO;
+static BOOL g_statusBarPolarityValid = NO;
+static CFAbsoluteTime g_statusBarPolarityCheckedAt = 0;
+static NSString *g_statusBarPolarityPath = nil;
+static const NSTimeInterval kDSStatusBarPolarityTTL = 1.0;
+
 static BOOL ds_status_bar_polarity(RemoteCall *process, BOOL fallback) {
     if (!process || !process.trojanMem) return fallback;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_statusBarPolarityValid && now - g_statusBarPolarityCheckedAt < kDSStatusBarPolarityTTL) {
+        return g_statusBarPolarity;
+    }
+    g_statusBarPolarityCheckedAt = now;
+
     BOOL decided = NO;
-    BOOL dark = ds_status_bar_read_polarity_in_process(process, &decided);
+    NSString *path = nil;
+    BOOL dark = ds_status_bar_read_polarity_in_process(process, &decided, &path);
+    if (decided) {
+        if (!g_statusBarPolarityValid || ![path isEqualToString:g_statusBarPolarityPath]) {
+            ds_append_checkpoint([NSString stringWithFormat:
+                @"Status bar polarity: darkText=%d via %@", dark ? 1 : 0, path ?: @"?"]);
+        }
+        g_statusBarPolarity = dark;
+        g_statusBarPolarityValid = YES;
+        g_statusBarPolarityPath = path;
+        return dark;
+    }
+
+    if (!g_statusBarPolarityValid) {
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"Status bar polarity unavailable (last step: %@); keeping the manual colour", path ?: @"?"]);
+    }
     // 读不到系统样式时保留调用方给的原颜色，避免颜色无故跳变。
-    return decided ? dark : fallback;
+    return fallback;
 }
+
 static uint64_t ds_remote_secure_canvas(RemoteCall *process, uint64_t textField) {
     uint64_t canvasClass = ds_remote_class(process, "_UITextLayoutCanvasView");
     uint64_t subviews = ds_remote_get_retained_object_on_main(
@@ -1799,6 +1865,8 @@ static void ds_finish_disable(void) {
     g_lastFontSize = -1.0;
     g_lastInverted = NO;
     g_lastDarkText = NO;
+    g_statusBarPolarityValid = NO;
+    g_statusBarPolarityPath = nil;
     g_lastBold = NO;
     g_lastHideAtSnapshot = NO;
     ds_reset_remote_symbol_cache();
