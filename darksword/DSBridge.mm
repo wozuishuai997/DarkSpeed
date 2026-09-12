@@ -823,8 +823,16 @@ static void ds_reset_remote_symbol_cache(void) {
     g_remoteClassCache = [NSMutableDictionary dictionary];
 }
 
+// Single fail-closed gate for every remote call. Once the connection is unhealthy
+// the remote-call layer has already refused to proceed (the last remote thread may
+// sit at an unmapped marker address), so issuing more calls can only add damage.
+// isHealthy is a latch that is only ever set once, so it is safe on every call site.
+static BOOL ds_remote_process_usable(RemoteCall *process) {
+    return process && process.trojanMem && rc_connection_healthy();
+}
+
 static uint64_t ds_remote_sel(RemoteCall *process, const char *name) {
-    if (!process || !process.trojanMem || !name) return 0;
+    if (!ds_remote_process_usable(process) || !name) return 0;
     if (!g_remoteSelectorCache) g_remoteSelectorCache = [NSMutableDictionary dictionary];
     NSString *key = [NSString stringWithUTF8String:name];
     if (!key) return 0;
@@ -836,7 +844,7 @@ static uint64_t ds_remote_sel(RemoteCall *process, const char *name) {
 }
 
 static uint64_t ds_remote_class(RemoteCall *process, const char *name) {
-    if (!process || !process.trojanMem || !name) return 0;
+    if (!ds_remote_process_usable(process) || !name) return 0;
     if (!g_remoteClassCache) g_remoteClassCache = [NSMutableDictionary dictionary];
     NSString *key = [NSString stringWithUTF8String:name];
     if (!key) return 0;
@@ -852,7 +860,7 @@ static uint64_t ds_remote_class(RemoteCall *process, const char *name) {
 // eventually filled RemoteCall's finite shared-page cache and turned a failed
 // write into a bogus Objective-C selector inside SpringBoard.
 static uint64_t ds_remote_create_string(RemoteCall *process, NSString *value) {
-    if (!process || !process.trojanMem || !value) return 0;
+    if (!ds_remote_process_usable(process) || !value) return 0;
     const char *utf8 = value.UTF8String;
     if (!utf8) return 0;
     size_t length = strlen(utf8) + 1;
@@ -878,7 +886,7 @@ static uint64_t ds_remote_create_string(RemoteCall *process, NSString *value) {
 static BOOL ds_perform_on_springboard_main(RemoteCall *process, uint64_t target,
                                            uint64_t selector, uint64_t argument,
                                            BOOL waitUntilDone) {
-    if (!process || !process.trojanMem || !target || !selector) return NO;
+    if (!ds_remote_process_usable(process) || !target || !selector) return NO;
     uint64_t perform = ds_remote_sel(process, "performSelectorOnMainThread:withObject:waitUntilDone:");
     if (!perform) return NO;
     // a0=selector, a1=object, a2=waitUntilDone (BOOL as uint64 on little-endian).
@@ -1733,7 +1741,10 @@ static void ds_finish_disable(void) {
     ds_stop_rate_timer();
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
-    rc_set_active_connection(nil);
+    // A disable request is an explicit teardown, so the removal below is allowed to
+    // run even if the connection latched unhealthy. The gate goes back to nil right
+    // after, and everything later is blocked by the health latch itself.
+    rc_set_active_connection(process);
     g_hudActive.store(false);
     if (process) {
         @try {
@@ -1747,6 +1758,8 @@ static void ds_finish_disable(void) {
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] destroyRemoteCall exception: %{public}@", exception.reason);
         }
     }
+    // The connection is gone: no remote call may be gated on it any more.
+    rc_set_active_connection(nil);
     g_remoteContainer = 0;
     g_remoteBlurView = 0;
     g_remoteBlurEffect = 0;
@@ -1835,6 +1848,12 @@ static void ds_finish_enable(void) {
             return;
         }
 
+        // Register the connection before the HUD is built. The remote helpers below
+        // consult this gate on every call, so it must be live during creation too:
+        // otherwise a connection that goes unhealthy mid-creation would keep being
+        // driven. An unhealthy latch still blocks everything from that point on.
+        rc_set_active_connection(g_springBoard);
+
         g_dsProgress.store(0.99);
         ds_set_stage(ds_localized(@"Creating SpringBoard HUD"));
         g_remoteLabel = ds_create_springboard_hud(g_springBoard);
@@ -1855,9 +1874,6 @@ static void ds_finish_enable(void) {
     }
 
     g_hudActive.store(true);
-    // From here on the suspended-connection helper answers "is this SpringBoard
-    // connection still safe to touch", so the refresh path can fail closed.
-    rc_set_active_connection(g_springBoard);
     g_dsRunning.store(false);
     g_dsProgress.store(1.0);
     ds_set_stage(ds_localized(@"SpringBoard HUD started"));
