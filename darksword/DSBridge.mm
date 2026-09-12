@@ -267,6 +267,13 @@ static NSString *ds_diag_snapshot(void) {
     }
     [out appendFormat:@"os=%@ %@\n", device.systemName ?: @"?", device.systemVersion ?: @"?"];
 
+    // PAC 探测统计：探测是否仍在按预期频率发生、端口是否安装失败、是否出现超时。
+    // 这些数字是判断"线程异常端口为何失效"的直接依据。
+    uint64_t probeTotal = 0, probeSigned = 0, probeTimeout = 0, probePortFail = 0;
+    rc_take_probe_stats(&probeTotal, &probeSigned, &probeTimeout, &probePortFail);
+    [out appendFormat:@"probes total=%llu signed=%llu timeout=%llu portFail=%llu\n",
+         probeTotal, probeSigned, probeTimeout, probePortFail];
+
     os_unfair_lock_lock(&g_diagLock);
     int count = g_diagRingCount;
     int start = (g_diagRingHead - count + DS_DIAG_RING_LINES) % DS_DIAG_RING_LINES;

@@ -28,6 +28,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+/// PAC 探测统计。
+void rc_take_probe_stats(uint64_t *total, uint64_t *signedOut,
+                         uint64_t *timeoutOut, uint64_t *portFailOut);
+
 /// 诊断回调：底层在关键事件（线程创建、探测结果、异常状态）上调用它。
 /// 应用侧注册后即可把这些事件写入可离线读取的日志；未注册时开销为一次判空。
 typedef void (*rc_diag_log_t)(const char *message);
