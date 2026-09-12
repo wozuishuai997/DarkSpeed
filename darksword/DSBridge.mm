@@ -325,6 +325,18 @@ static void ds_start_lifecycle_logging(void) {
     });
 }
 
+// 最近一次真正下发到 SpringBoard 的文字与样式路径。
+// 用于区分"文字没变"和"下发了但屏幕不重绘"这两种完全不同的故障。
+static NSString *g_lastSentText = nil;
+static BOOL g_lastAppliedStyle = NO;
+static unsigned long long g_sendCount = 0;
+
+static void ds_note_sent_text(NSString *text, BOOL appliedStyle) {
+    g_lastSentText = [text copy];
+    g_lastAppliedStyle = appliedStyle;
+    g_sendCount++;
+}
+
 static void ds_write_heartbeat_line(void) {
     if (!g_diagEnabled.load()) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -351,7 +363,7 @@ static void ds_write_heartbeat_line(void) {
 
     NSString *line = [NSString stringWithFormat:
         @"%@  uptime=%.0fs hud=%d label=%d win=%d %@ rss=%.1fMB peakRss=%.1fMB"
-         " probes=%llu/%llu rpc=%llu/%llu/%llu/%llu/%llu\n",
+         " probes=%llu/%llu rpc=%llu/%llu/%llu/%llu/%llu sends=%llu style=%d text=\"%@\"\n",
         NSDate.date,
         g_diagStart > 0 ? now - g_diagStart : 0,
         g_hudActive.load() ? 1 : 0,
@@ -361,7 +373,10 @@ static void ds_write_heartbeat_line(void) {
         rss,
         s_peakRSS,
         probeTotal, probeSigned,
-        rpcWait, rpcSecond, rpcUnexpected, rpcFaultEntry, rpcReplyFailed];
+        rpcWait, rpcSecond, rpcUnexpected, rpcFaultEntry, rpcReplyFailed,
+        g_sendCount,
+        g_lastAppliedStyle ? 1 : 0,
+        g_lastSentText.length > 24 ? [g_lastSentText substringToIndex:24] : (g_lastSentText ?: @"(none)")];
 
     // 终态文件：每次覆盖，体积恒定。
     [line writeToFile:[dir stringByAppendingPathComponent:@"Heartbeat.log"]
@@ -1815,6 +1830,7 @@ static void ds_update_rate(void) {
                                            reason:@"remote presentation update failed"
                                          userInfo:nil];
         }
+        ds_note_sent_text(text, applyStyle);
         ds_write_heartbeat_line();
         g_lastPresentationPreferences = [preferences copy];
         g_lastPresentationOrientation = orientation;
