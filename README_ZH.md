@@ -2,7 +2,7 @@
 
 [English](README.md) · [原版 TrollSpeed](README_TrollSpeed.md) · [项目仓库](https://github.com/huami1314/DarkSpeed)
 
-当前版本：**1.0-13**
+当前版本：**1.0-14**
 
 DarkSpeed 是一个仅通过 IPA 安装、直接显示在 SpringBoard 上的网速悬浮窗。它保留 TrollSpeed 熟悉的显示和设置，同时提供独立的签名应用运行时与 SpringBoard 渲染器。
 
@@ -51,7 +51,7 @@ DarkSpeed 支持 DarkSword 所支持的全部设备。由于 MTE，DarkSpeed 无
 DARKSPEED_UNSIGNED=1 ./build-darkspeed.sh
 ```
 
-安装包输出为 `packages/DarkSpeed_1.0-13.ipa`。版本 `1.0-13` 对应版本号 `1.0`、构建号 `13`。
+安装包输出为 `packages/DarkSpeed_1.0-14.ipa`。版本 `1.0-14` 对应版本号 `1.0`、构建号 `14`。
 
 ## 致谢
 

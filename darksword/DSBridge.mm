@@ -1249,6 +1249,20 @@ static BOOL ds_status_bar_read_polarity_in_process(RemoteCall *process, BOOL *de
         }
     }
 
+    // 兜底 3：SpringBoard 提供的直接入口，不需要先找到 scene。
+    // 实测 connectedScenes 与 mainWindowScene 都取不到，这条是 SpringBoard 侧的正规路径。
+    if (!manager) {
+        uint64_t managerClass = ds_remote_class(process, "SBWindowSceneStatusBarManager");
+        uint64_t direct = managerClass
+            ? ds_remote_get_object_on_main(
+                  process, managerClass, "windowSceneStatusBarManagerForEmbeddedDisplay")
+            : 0;
+        if (direct) {
+            manager = direct;
+            sceneSource = @"SBWindowSceneStatusBarManager";
+        }
+    }
+
     if (!manager) {
         if (pathOut) *pathOut = @"no-scene-with-statusbarmanager";
         return NO;
@@ -1305,12 +1319,14 @@ static BOOL ds_status_bar_read_polarity_in_process(RemoteCall *process, BOOL *de
     return dark;
 }
 
-// 解析结果缓存，避免每次刷新都跑完整条远端读取链。
+// 解析结果缓存。状态栏变化远没有刷新那么频繁，而每次远端读取都要走一次完整的
+// RemoteCall 往返（含 PAC 探测），频率越高越容易踩到底层的不稳定路径。因此按
+// 较长周期复查，而不是每个刷新周期都读。
 static BOOL g_statusBarPolarity = NO;
 static BOOL g_statusBarPolarityValid = NO;
 static CFAbsoluteTime g_statusBarPolarityCheckedAt = 0;
 static NSString *g_statusBarPolarityPath = nil;
-static const NSTimeInterval kDSStatusBarPolarityTTL = 1.0;
+static const NSTimeInterval kDSStatusBarPolarityTTL = 5.0;
 
 static BOOL ds_status_bar_polarity(RemoteCall *process, BOOL fallback) {
     if (!process || !process.trojanMem) return fallback;
@@ -1680,6 +1696,20 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
 static void ds_update_rate(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard || !g_remoteLabel) return;
+
+    // 关断闸门：一旦发现未签名标记地址进入活动线程，连接已被污染，任何后续远程调用
+    // 都可能把该线程恢复执行并触发 PAC_EXCEPTION 杀死 SpringBoard。此时停止刷新，
+    // 宁可悬浮窗冻结，也不让系统进程被带走。
+    RemoteCall *springBoard = g_springBoard;
+    if (!springBoard.isHealthy) {
+        NSString *detail = springBoard.healthDetail;
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"HUD refresh suspended: SpringBoard connection unhealthy (%@)",
+            detail.length > 0 ? detail : @"unknown"]);
+        g_hudActive.store(false);
+        ds_stop_rate_timer();
+        return;
+    }
 
     uint64_t input = 0;
     uint64_t output = 0;
