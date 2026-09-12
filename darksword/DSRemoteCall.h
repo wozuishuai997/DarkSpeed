@@ -28,6 +28,11 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+/// 诊断回调：底层在关键事件（线程创建、探测结果、异常状态）上调用它。
+/// 应用侧注册后即可把这些事件写入可离线读取的日志；未注册时开销为一次判空。
+typedef void (*rc_diag_log_t)(const char *message);
+void rc_set_diag_log(rc_diag_log_t callback);
+
 uint64_t remote_sel(RemoteCall *process, const char *name);
 uint64_t remote_getClass(RemoteCall *process, const char *name);
 uint64_t remote_msg(RemoteCall *process, uint64_t object, uint64_t selector,

@@ -132,6 +132,7 @@ static int g_diagRingCount = 0;     // 已填充条数
 static os_unfair_lock g_diagLock = OS_UNFAIR_LOCK_INIT;
 static dispatch_source_t g_diagTimer = nil;
 static uint64_t g_diagEvents = 0;   // 本次会话累计事件数
+static CFAbsoluteTime g_diagStart = 0;
 static std::atomic_bool g_diagEnabled(false);
 
 static NSString *ds_diag_log_path(void) {
@@ -150,67 +151,11 @@ static void ds_diag_record(const char *message) {
     os_unfair_lock_unlock(&g_diagLock);
 }
 
-static NSString *ds_diag_snapshot(void) {
-    NSMutableString *out = [NSMutableString string];
-    UIDevice *device = UIDevice.currentDevice;
-    [out appendFormat:@"== %@  uptime=%.0fs events=%llu\n",
-         NSDate.date,
-         g_diagEvents ? CFAbsoluteTimeGetCurrent() - g_watchdogStart : 0.0,
-         g_diagEvents];
-    [out appendFormat:@"hudActive=%d requested=%d label=%d window=%d container=%d\n",
-         g_hudActive.load() ? 1 : 0,
-         g_hudRequested.load() ? 1 : 0,
-         g_remoteLabel ? 1 : 0,
-         g_remoteWindow ? 1 : 0,
-         g_remoteContainer ? 1 : 0];
-    if (g_springBoard) {
-        [out appendFormat:@"remote pid=%d trojanMem=0x%llx lastError=%@\n",
-             g_springBoard.pid,
-             g_springBoard.trojanMem,
-             g_springBoard.lastError.length ? g_springBoard.lastError : @"(none)"];
-    }
-    [out appendFormat:@"os=%@ %@\n", device.systemName ?: @"?", device.systemVersion ?: @"?"];
-
-    os_unfair_lock_lock(&g_diagLock);
-    int count = g_diagRingCount;
-    int start = (g_diagRingHead - count + DS_DIAG_RING_LINES) % DS_DIAG_RING_LINES;
-    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
-    for (int i = 0; i < count; i++) {
-        const char *line = g_diagRing[(start + i) % DS_DIAG_RING_LINES];
-        if (line[0]) [lines addObject:[NSString stringWithUTF8String:line] ?: @"?"];
-    }
-    g_diagRingCount = 0; // 已消费，避免重复落盘
-    os_unfair_lock_unlock(&g_diagLock);
-
-    for (NSString *line in lines) [out appendFormat:@"  %@\n", line];
-    return out;
-}
-
-static void ds_diag_flush(void) {
-    if (!g_diagEnabled.load()) return;
-    NSString *path = ds_diag_log_path();
-    if (!path.length) return;
-    NSString *text = ds_diag_snapshot();
-    if (!text.length) return;
-    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data.length) return;
-    ds_rotate_log_if_needed(path, data.length);
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!handle) {
-        [data writeToFile:path options:NSDataWritingAtomic error:nil];
-        return;
-    }
-    @try {
-        [handle seekToEndOfFile];
-        [handle writeData:data];
-        [handle synchronizeFile];
-    } @catch (__unused NSException *exception) {
-    }
-    [handle closeFile];
-}
+static void ds_diag_flush(void);
 
 static void ds_diag_configure(BOOL enabled) {
     g_diagEnabled.store(enabled);
+    if (enabled && g_diagStart <= 0) g_diagStart = CFAbsoluteTimeGetCurrent();
     if (enabled) {
         // 底层回调只需注册一次。
         static dispatch_once_t onceToken;
@@ -296,6 +241,66 @@ static uint64_t g_remoteTextAttributes = 0;
 static uint64_t g_remoteSecureField = 0;
 static uint64_t g_remoteSecureCanvas = 0;
 static uint64_t g_remoteWindow = 0;
+
+static NSString *ds_diag_snapshot(void) {
+    NSMutableString *out = [NSMutableString string];
+    UIDevice *device = UIDevice.currentDevice;
+    [out appendFormat:@"== %@  uptime=%.0fs events=%llu\n",
+         NSDate.date,
+         CFAbsoluteTimeGetCurrent() - g_diagStart,
+         g_diagEvents];
+    [out appendFormat:@"hudActive=%d requested=%d label=%d window=%d container=%d\n",
+         g_hudActive.load() ? 1 : 0,
+         g_hudRequested.load() ? 1 : 0,
+         g_remoteLabel ? 1 : 0,
+         g_remoteWindow ? 1 : 0,
+         g_remoteContainer ? 1 : 0];
+    if (g_springBoard) {
+        [out appendFormat:@"remote pid=%d trojanMem=0x%llx lastError=%@\n",
+             g_springBoard.pid,
+             g_springBoard.trojanMem,
+             g_springBoard.lastError.length ? g_springBoard.lastError : @"(none)"];
+    }
+    [out appendFormat:@"os=%@ %@\n", device.systemName ?: @"?", device.systemVersion ?: @"?"];
+
+    os_unfair_lock_lock(&g_diagLock);
+    int count = g_diagRingCount;
+    int start = (g_diagRingHead - count + DS_DIAG_RING_LINES) % DS_DIAG_RING_LINES;
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (int i = 0; i < count; i++) {
+        const char *line = g_diagRing[(start + i) % DS_DIAG_RING_LINES];
+        if (line[0]) [lines addObject:[NSString stringWithUTF8String:line] ?: @"?"];
+    }
+    g_diagRingCount = 0; // 已消费，避免重复落盘
+    os_unfair_lock_unlock(&g_diagLock);
+
+    for (NSString *line in lines) [out appendFormat:@"  %@\n", line];
+    return out;
+}
+
+static void ds_diag_flush(void) {
+    if (!g_diagEnabled.load()) return;
+    NSString *path = ds_diag_log_path();
+    if (!path.length) return;
+    NSString *text = ds_diag_snapshot();
+    if (!text.length) return;
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data.length) return;
+    ds_rotate_log_if_needed(path, data.length);
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!handle) {
+        [data writeToFile:path options:NSDataWritingAtomic error:nil];
+        return;
+    }
+    @try {
+        [handle seekToEndOfFile];
+        [handle writeData:data];
+        [handle synchronizeFile];
+    } @catch (__unused NSException *exception) {
+    }
+    [handle closeFile];
+}
+
 static uint64_t g_remoteWindowScene = 0;
 static uint64_t g_remoteOrientationObserver = 0;
 static pid_t g_remoteWindowPid = 0;
