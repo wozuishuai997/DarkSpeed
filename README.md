@@ -2,7 +2,7 @@
 
 [简体中文](README_ZH.md) · [Original TrollSpeed](README_TrollSpeed.md) · [Repository](https://github.com/huami1314/DarkSpeed)
 
-Current version: **1.0-14**
+Current version: **1.0-15**
 
 DarkSpeed is an IPA-only network-speed HUD for SpringBoard. It retains TrollSpeed's familiar display and settings while providing its own signed-app runtime and SpringBoard renderer.
 
@@ -51,7 +51,7 @@ For an unsigned IPA that will be signed later:
 DARKSPEED_UNSIGNED=1 ./build-darkspeed.sh
 ```
 
-The output is `packages/DarkSpeed_1.0-14.ipa`. Version `1.0-14` maps to marketing version `1.0` and build `14`.
+The output is `packages/DarkSpeed_1.0-15.ipa`. Version `1.0-15` maps to marketing version `1.0` and build `15`.
 
 ## Credits
 
