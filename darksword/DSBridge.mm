@@ -350,6 +350,8 @@ static const uint64_t kDSRemoteTextScratchOffset = 0x1000;
 static const size_t kDSRemoteTextScratchCapacity = 0x800;
 
 static void ds_update_rate(void);
+static void ds_stop_rate_timer(void);
+static void ds_teardown_failed_hud(NSString *reason);
 static void ds_stop_keepalive(void);
 
 typedef struct {
@@ -1620,7 +1622,6 @@ static void ds_update_rate(void) {
     g_previousInput = input;
     g_previousOutput = output;
     g_previousSampleTime = now;
-
     if (g_remoteOrientationObserver || g_remoteWindowScene) {
         uint64_t orientation = g_remoteOrientationObserver
             ? ds_remote_get_u64_on_main(g_springBoard, g_remoteOrientationObserver, "activeInterfaceOrientation")
@@ -1657,10 +1658,11 @@ static void ds_update_rate(void) {
         g_lastPresentationOrientation = orientation;
     } @catch (NSException *exception) {
         ds_set_error([NSString stringWithFormat:@"SpringBoard HUD update failed: %@", exception.reason]);
-        g_hudActive.store(false);
+        // 主动收尾：把半死的连接和它注入的线程一起清掉，避免留下会在任意时刻
+        // 被调度执行的危险线程（那正是后续 SpringBoard 崩溃与整机 panic 的起点）。
+        ds_teardown_failed_hud(exception.reason);
     }
 }
-
 static void ds_configure_rate_timer(NSDictionary *preferences) {
     if (!g_rateTimer) return;
     // 直接调整采样与绘制定时器，不保留每秒唤醒后跳过绘制的轮询。
@@ -1830,6 +1832,51 @@ BOOL DSBridgeBootstrap(void) {
     return YES;
 }
 
+// 远端刷新失败后的主动收尾。
+//
+// 实测日志显示过这条模式：某次刷新报 "remote presentation update failed" 之后 HUD 再也
+// 没恢复，但连接与那条被注入的线程仍然留在 SpringBoard 里；此后才出现标记地址崩溃，
+// 进而 SpringBoard 挂掉、watchdog 整机 panic。
+//
+// 与其把一条半死的连接留着，不如在这里主动销毁它：destroyRemoteCall 会终止被注入的
+// 线程并回收远端窗口，下一次启用会重新建立一条干净的连接。代价是悬浮窗关闭（用户可
+// 再开），换来的是不再留下可能在任意时刻被调度执行的危险线程。
+static void ds_teardown_failed_hud(NSString *reason) {
+    ds_append_checkpoint([NSString stringWithFormat:
+        @"tearing down HUD after failure: %@", reason ?: @"?"]);
+    ds_unregister_hud_notifications();
+    ds_stop_rate_timer();
+    g_hudActive.store(false);
+    g_hudRequested.store(false);
+
+    RemoteCall *process = g_springBoard;
+    g_springBoard = nil;
+    if (process) {
+        @try {
+            [process destroyRemoteCall];
+        } @catch (NSException *exception) {
+            os_log_error(OS_LOG_DEFAULT, "[DSBridge] teardown destroyRemoteCall exception: %{public}@",
+                         exception.reason);
+        }
+    }
+    g_remoteContainer = 0;
+    g_remoteBlurView = 0;
+    g_remoteLabel = 0;
+    g_remoteTextAttributes = 0;
+    g_remoteSecureField = 0;
+    g_remoteSecureCanvas = 0;
+    g_remoteWindow = 0;
+    g_remoteWindowScene = 0;
+    g_remoteOrientationObserver = 0;
+    g_remoteWindowPid = 0;
+    g_lastPresentationPreferences = nil;
+    ds_reset_remote_symbol_cache();
+    ds_stop_keepalive();
+    ds_set_stage(ds_localized(@"HUD closed"));
+    notify_post(NOTIFY_RELOAD_APP);
+    ds_append_checkpoint(@"HUD torn down; re-enable to build a fresh connection");
+}
+
 static void ds_finish_disable(void) {
     ds_set_stage(ds_localized(@"Closing HUD"));
     ds_unregister_hud_notifications();
@@ -1920,6 +1967,21 @@ static void ds_finish_enable(void) {
     }
 
     @try {
+        // 防抖：实测日志里出现过间隔仅 1 秒的连续开关。每次启用都会重跑整条越狱链
+        // 并向 SpringBoard 注入新线程，快速反复触发只会不断累积风险，因此给一个冷却窗。
+        static CFAbsoluteTime s_lastRemoteAttempt = 0;
+        CFAbsoluteTime attemptNow = CFAbsoluteTimeGetCurrent();
+        const CFTimeInterval kDSRemoteAttemptCooldown = 5.0;
+        if (s_lastRemoteAttempt > 0 && attemptNow - s_lastRemoteAttempt < kDSRemoteAttemptCooldown) {
+            ds_append_checkpoint([NSString stringWithFormat:
+                @"enable attempt ignored: only %.1fs since the previous attempt (cooldown %.0fs)",
+                attemptNow - s_lastRemoteAttempt, kDSRemoteAttemptCooldown]);
+            g_hudRequested.store(false);
+            ds_fail_enable(ds_localized(@"Please wait a few seconds before enabling the HUD again."));
+            return;
+        }
+        s_lastRemoteAttempt = attemptNow;
+
         os_log(OS_LOG_DEFAULT, "[DSBridge] SpringBoard proc=0x%llx self=0x%llx — starting RemoteCall",
                (unsigned long long)sbProc, (unsigned long long)ds_get_our_proc());
         g_dsProgress.store(0.98);

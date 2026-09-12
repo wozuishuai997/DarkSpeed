@@ -207,6 +207,7 @@
 
 /* HUD appearance */
 "Bold Text" = "Texto en negrita";
+"Please wait a few seconds before enabling the HUD again." = "Espera unos segundos antes de volver a activar el HUD.";
 "Detailed Logging" = "Registro detallado";
 "ON (Files/DarkSpeed)" = "ACTIVADO (Archivos/DarkSpeed)";
 "Background" = "Fondo";

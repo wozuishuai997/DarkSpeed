@@ -219,6 +219,7 @@
 
 /* HUD appearance */
 "Bold Text" = "Bold Text";
+"Please wait a few seconds before enabling the HUD again." = "Please wait a few seconds before enabling the HUD again.";
 "Detailed Logging" = "Detailed Logging";
 "ON (Files/DarkSpeed)" = "ON (Files/DarkSpeed)";
 "Background" = "Background";
