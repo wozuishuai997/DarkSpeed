@@ -50,20 +50,30 @@ static void ds_post_progress(void) {
     });
 }
 
-static NSString *ds_checkpoint_log_path(void) {
+// 诊断日志写入两个位置：
+//   Documents/DSBridge.log —— 通过 Info.plist 的 UIFileSharingEnabled 暴露，用户可直接取；
+//   Library/DSBridge.log   —— 原有位置，保持兼容。
+// Documents 目录同时存放 DarkSword 的 kernelcache，文件名不同，互不影响。
+static NSString *ds_checkpoint_log_path_in(NSSearchPathDirectory directory) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(
-        NSLibraryDirectory, NSUserDomainMask, YES);
-    NSString *library = paths.firstObject;
-    return library.length ? [library stringByAppendingPathComponent:@"DSBridge.log"] : nil;
+        directory, NSUserDomainMask, YES);
+    NSString *base = paths.firstObject;
+    return base.length ? [base stringByAppendingPathComponent:@"DSBridge.log"] : nil;
 }
 
-static void ds_append_checkpoint(NSString *message) {
-    NSString *path = ds_checkpoint_log_path();
-    if (!path.length || !message.length) return;
-    NSString *line = [NSString stringWithFormat:@"%@  %@\n", NSDate.date, message];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data) return;
+// 每个路径各自限长，避免长时间运行时日志无限增长。
+static const unsigned long long kDSCheckpointLogLimit = 256 * 1024;
+
+static void ds_append_checkpoint_to(NSString *path, NSData *data) {
+    if (!path.length || !data.length) return;
     NSFileManager *fm = NSFileManager.defaultManager;
+    NSDictionary *attributes = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long size = [attributes[NSFileSize] unsignedLongLongValue];
+    if (size > 0 && size + data.length > kDSCheckpointLogLimit) {
+        // 超限后重开，保留最近一段，避免把沙盒写满。
+        [data writeToFile:path options:NSDataWritingAtomic error:nil];
+        return;
+    }
     if (![fm fileExistsAtPath:path]) {
         [data writeToFile:path options:NSDataWritingAtomic error:nil];
         return;
@@ -77,6 +87,15 @@ static void ds_append_checkpoint(NSString *message) {
     } @catch (__unused NSException *exception) {
     }
     [handle closeFile];
+}
+
+static void ds_append_checkpoint(NSString *message) {
+    if (!message.length) return;
+    NSString *line = [NSString stringWithFormat:@"%@  %@\n", NSDate.date, message];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return;
+    ds_append_checkpoint_to(ds_checkpoint_log_path_in(NSDocumentDirectory), data);
+    ds_append_checkpoint_to(ds_checkpoint_log_path_in(NSLibraryDirectory), data);
 }
 
 #if USE_DARKSWORD
