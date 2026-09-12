@@ -50,6 +50,11 @@ import UIKit
     }
 
     open override func settingEnabled(index: Int) -> Bool {
+        // 透明模式下文字极性由系统状态栏决定，手动反色开关无效，置灰避免混淆。
+        if DSBridgeCompiledIn(), index == TSSettingsIndex.usesInvertedColor.rawValue,
+           delegate?.settingHighlighted(key: HUDUserDefaultsKeyTransparentBackground) == true {
+            return false
+        }
         guard !isSpeedMode else { return true }
         let setting = TSSettingsIndex.allCases[index]
         switch setting {
@@ -145,8 +150,9 @@ import UIKit
         delegate?.settingDidSelect(key: settingKey(index: index))
         completion()
 
-        // When display mode is toggled, update enabled/disabled state of affected cells in-place
-        if index == TSSettingsIndex.displayMode.rawValue {
+        // When display mode or background is toggled, update enabled/disabled state of affected cells in-place
+        if index == TSSettingsIndex.displayMode.rawValue ||
+           index == TSSettingsIndex.transparentBackground.rawValue {
             for cell in collectionView.visibleCells {
                 if let settingCell = cell as? SPLarkSettingsCollectionViewCell,
                    let indexPath = collectionView.indexPath(for: settingCell) {

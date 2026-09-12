@@ -221,6 +221,7 @@
 "Bold Text" = "文字加粗";
 "Background" = "背景";
 "Transparent" = "透明";
+"Transparent (System)" = "透明（跟随系统）";
 "Original" = "原样";
 "Font Size" = "字号";
 "%g pt" = "%g 号";

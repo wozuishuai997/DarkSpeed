@@ -128,7 +128,10 @@ enum TSSettingsIndex: Int, CaseIterable {
         case .refreshInterval:
             return String(format: NSLocalizedString("Every %g seconds", comment: "TSSettingsIndex"), refreshInterval)
         case .transparentBackground:
-            return highlighted ? NSLocalizedString("Transparent", comment: "TSSettingsIndex") : NSLocalizedString("Original", comment: "TSSettingsIndex")
+            // DarkSpeed 构建下透明模式会跟随系统状态栏自动反色，文案标出该行为。
+            return highlighted
+                ? NSLocalizedString(DSBridgeCompiledIn() ? "Transparent (System)" : "Transparent", comment: "TSSettingsIndex")
+                : NSLocalizedString("Original", comment: "TSSettingsIndex")
         }
     }
 }

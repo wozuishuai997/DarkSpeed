@@ -209,6 +209,7 @@
 "Bold Text" = "Texto en negrita";
 "Background" = "Fondo";
 "Transparent" = "Transparente";
+"Transparent (System)" = "Transparente (sistema)";
 "Original" = "Original";
 "Font Size" = "Tamaño de letra";
 "%g pt" = "%g pt";
