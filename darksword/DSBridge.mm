@@ -1931,6 +1931,15 @@ static void ds_finish_enable(void) {
             if (remoteError.length == 0 && g_springBoard) remoteError = g_springBoard.lastError;
             if (remoteError.length == 0) remoteError = @"RemoteCall init failed (no detail)";
             ds_append_checkpoint([ds_localized(@"SpringBoard connection failed: ") stringByAppendingString:remoteError]);
+            // 初始化即使失败，也可能已经向 SpringBoard 注入过线程。必须显式销毁，
+            // 否则那条线程会被留在标记地址上成为孤儿：反复重试会不断累积，
+            // 最终被内核调度时杀死 SpringBoard。
+            if (g_springBoard) {
+                @try {
+                    [g_springBoard destroyRemoteCall];
+                } @catch (__unused NSException *exception) {
+                }
+            }
             g_springBoard = nil;
             ds_fail_enable([NSString stringWithFormat:
                 ds_localized(@"SpringBoard connection failed: %@\nRetry or reinstall over the existing app; restart the device only as a last resort."),
@@ -1948,6 +1957,13 @@ static void ds_finish_enable(void) {
             return;
         }
     } @catch (NSException *exception) {
+        // 同上：异常路径也必须销毁连接，避免留下孤儿线程。
+        if (g_springBoard) {
+            @try {
+                [g_springBoard destroyRemoteCall];
+            } @catch (__unused NSException *inner) {
+            }
+        }
         g_springBoard = nil;
         ds_fail_enable([NSString stringWithFormat:
             ds_localized(@"SpringBoard HUD exception: %@\nRetry or reinstall over the existing app; restart the device only as a last resort."),
