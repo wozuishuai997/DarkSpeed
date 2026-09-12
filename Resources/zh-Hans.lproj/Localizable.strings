@@ -212,6 +212,7 @@
 "SpringBoard HUD creation failed. Retry or reinstall over the existing app; restart the device only as a last resort." = "SpringBoard HUD 创建失败。请重试；仍失败请覆盖安装，最后再手动重启设备。";
 "SpringBoard HUD exception: %@\nRetry or reinstall over the existing app; restart the device only as a last resort." = "SpringBoard HUD 异常：%@\n请重试；仍失败请覆盖安装，最后再手动重启设备。";
 "SpringBoard HUD started" = "SpringBoard HUD 已启动";
+"SpringBoard HUD updates stopped to protect SpringBoard: %@" = "为保护 SpringBoard，已停止 HUD 刷新：%@";
 "DarkSpeed is not enabled in this build." = "当前构建未启用 DarkSpeed 运行时。";
 "Waiting to start" = "等待启动";
 "Time" = "时间";

@@ -199,6 +199,7 @@
 "Connecting to SpringBoard" = "Conectando con SpringBoard";
 "Creating SpringBoard HUD" = "Creando HUD de SpringBoard";
 "SpringBoard HUD started" = "HUD de SpringBoard iniciado";
+"SpringBoard HUD updates stopped to protect SpringBoard: %@" = "Se detuvieron las actualizaciones del HUD para proteger SpringBoard: %@";
 "DarkSpeed startup failed. Retry or reinstall over the existing app; restart the device only as a last resort." = "DarkSpeed no pudo iniciarse. Vuelve a intentarlo o reinstala sobre la aplicación existente; reinicia el dispositivo solo como último recurso.";
 "DarkSpeed is not enabled in this build." = "El entorno de DarkSpeed no está activado en esta compilación.";
 "Waiting to start" = "Esperando para iniciar";

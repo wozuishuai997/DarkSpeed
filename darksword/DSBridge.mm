@@ -1482,6 +1482,24 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 static void ds_update_rate(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard || !g_remoteLabel) return;
 
+    // Fail closed: a remote call that trapped unexpectedly can have left a thread
+    // inside SpringBoard in a state we no longer own. Issuing another call could
+    // resume that thread at an unmapped marker address and kill SpringBoard, so the
+    // refresh is skipped instead. The HUD freezes; it does not take the system down.
+    RemoteCall *springBoard = g_springBoard;
+    if (!springBoard.isHealthy) {
+        NSString *detail = springBoard.healthDetail;
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"HUD refresh suspended: SpringBoard connection unhealthy (%@)",
+            detail.length > 0 ? detail : @"unknown"]);
+        g_hudActive.store(false);
+        ds_set_error([NSString stringWithFormat:
+            ds_localized(@"SpringBoard HUD updates stopped to protect SpringBoard: %@"),
+            detail.length > 0 ? detail : @"unknown"]);
+        ds_stop_rate_timer();
+        return;
+    }
+
     uint64_t input = 0;
     uint64_t output = 0;
     ds_read_network_bytes(&input, &output);
@@ -1534,7 +1552,10 @@ static void ds_update_rate(void) {
         g_lastPresentationOrientation = orientation;
     } @catch (NSException *exception) {
         ds_set_error([NSString stringWithFormat:@"SpringBoard HUD update failed: %@", exception.reason]);
+        // Same reasoning as the health gate above: stop driving SpringBoard on the
+        // first failed update instead of retrying into a possibly damaged thread.
         g_hudActive.store(false);
+        ds_stop_rate_timer();
     }
 }
 
@@ -1711,6 +1732,7 @@ static void ds_finish_disable(void) {
     ds_stop_rate_timer();
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
+    rc_set_active_connection(nil);
     g_hudActive.store(false);
     if (process) {
         @try {
@@ -1804,6 +1826,7 @@ static void ds_finish_enable(void) {
             if (remoteError.length == 0 && g_springBoard) remoteError = g_springBoard.lastError;
             if (remoteError.length == 0) remoteError = @"RemoteCall init failed (no detail)";
             ds_append_checkpoint([ds_localized(@"SpringBoard connection failed: ") stringByAppendingString:remoteError]);
+            rc_set_active_connection(nil);
             g_springBoard = nil;
             ds_fail_enable([NSString stringWithFormat:
                 ds_localized(@"SpringBoard connection failed: %@\nRetry or reinstall over the existing app; restart the device only as a last resort."),
@@ -1815,12 +1838,14 @@ static void ds_finish_enable(void) {
         ds_set_stage(ds_localized(@"Creating SpringBoard HUD"));
         g_remoteLabel = ds_create_springboard_hud(g_springBoard);
         if (!g_remoteLabel) {
+            rc_set_active_connection(nil);
             [g_springBoard destroyRemoteCall];
             g_springBoard = nil;
             ds_fail_enable(ds_localized(@"SpringBoard HUD creation failed. Retry or reinstall over the existing app; restart the device only as a last resort."));
             return;
         }
     } @catch (NSException *exception) {
+        rc_set_active_connection(nil);
         g_springBoard = nil;
         ds_fail_enable([NSString stringWithFormat:
             ds_localized(@"SpringBoard HUD exception: %@\nRetry or reinstall over the existing app; restart the device only as a last resort."),
@@ -1829,6 +1854,9 @@ static void ds_finish_enable(void) {
     }
 
     g_hudActive.store(true);
+    // From here on the suspended-connection helper answers "is this SpringBoard
+    // connection still safe to touch", so the refresh path can fail closed.
+    rc_set_active_connection(g_springBoard);
     g_dsRunning.store(false);
     g_dsProgress.store(1.0);
     ds_set_stage(ds_localized(@"SpringBoard HUD started"));

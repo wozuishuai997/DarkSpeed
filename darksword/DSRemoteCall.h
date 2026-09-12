@@ -14,6 +14,14 @@
 @property(nonatomic) uint64_t trojanMemScratchOffset;
 @property(nonatomic) pid_t pid;
 
+/// NO once the connection may have left a thread inside the target process in a
+/// state we no longer own. The bridge treats NO as a hard stop: no further remote
+/// calls are issued, so a damaged thread can never be resumed into the 0x401
+/// marker and take SpringBoard down with it.
+@property(nonatomic, readonly) BOOL isHealthy;
+@property(nonatomic, readonly) NSString *healthDetail;
+- (void)markUnhealthy:(NSString *)reason;
+
 + (NSString *)lastInitError;
 - (instancetype)initWithProcess:(NSString *)process useMigFilterBypass:(BOOL)useMigFilterBypass;
 - (BOOL)doRemoteCallSyncOnMainThread:(BOOL (^)(void))block;
