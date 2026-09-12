@@ -424,6 +424,32 @@ static const CACornerMask kDSCornerMaskAll =
     kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
 
 static RemoteCall *g_springBoard = nil;
+
+// 已退休的 SpringBoard 连接，永久持有、绝不释放。
+//
+// 原因见 RemoteCall.m 里 dealloc 的说明：RemoteCall 一旦析构，ARC 会带走它那两个
+// 异常端口的发送权，而 SpringBoard 里被注入的线程正停在这些端口上等回复。端口变成
+// 死名字的那一刻，就是线程被放出来在标记地址上取指、SpringBoard 被打死的时刻。
+//
+// 数组只增不减、容量有上限；达到上限后放弃退休动作 —— 宁可多留几百字节，也不能让
+// 一个可能还挂着线程的连接被释放。
+static NSMutableArray<RemoteCall *> *g_retiredConnections = nil;
+static const NSUInteger kDSMaxRetiredConnections = 16;
+
+static void ds_retire_connection(RemoteCall *connection) {
+    if (!connection) return;
+    if (!g_retiredConnections) g_retiredConnections = [NSMutableArray array];
+    if (g_retiredConnections.count >= kDSMaxRetiredConnections) {
+        ds_append_checkpoint([NSString stringWithFormat:
+            @"retired-connection list is full (%lu); keeping this one alive anyway",
+            (unsigned long)g_retiredConnections.count]);
+    }
+    [g_retiredConnections addObject:connection];
+    ds_append_checkpoint([NSString stringWithFormat:
+        @"connection retired and kept alive (%lu held): trojanMem=0x%llx pid=%d",
+        (unsigned long)g_retiredConnections.count,
+        connection.trojanMem, connection.pid]);
+}
 static uint64_t g_remoteContainer = 0;
 static uint64_t g_remoteBlurView = 0;
 static uint64_t g_remoteBlurEffect = 0;
@@ -2262,6 +2288,7 @@ static void ds_teardown_failed_hud(NSString *reason) {
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
     if (process) {
+        ds_retire_connection(process);
         @try {
             [process destroyRemoteCall];
         } @catch (NSException *exception) {
@@ -2295,6 +2322,7 @@ static void ds_finish_disable(void) {
     g_springBoard = nil;
     g_hudActive.store(false);
     if (process) {
+        ds_retire_connection(process);
         @try {
             ds_remove_springboard_hud(process);
         } @catch (NSException *exception) {
@@ -2399,20 +2427,24 @@ static void ds_finish_enable(void) {
         g_dsProgress.store(0.98);
         ds_set_stage(ds_localized(@"Connecting to SpringBoard"));
 
-        // 关键：建新连接之前必须先拆掉旧连接。
+        // 建新连接之前必须先拆掉旧连接。
         //
         // 每个 RemoteCall 都会往 SpringBoard 注入一条线程，并让它在**我们进程**的异常
-        // 端口上等回复。以前这里直接 g_springBoard = [[RemoteCall alloc] ...]，旧对象
-        // 被覆盖后就成了孤儿：它的异常端口名仍留在我们进程里，但已经没有任何代码会去
-        // 收那条线程的异常。反复启用就会在 SpringBoard 里攒下一条条这样的线程，直到某
-        // 一条被内核调度执行、在未映射的标记地址（0x101/0x201/0x301/0x401）上取指，
-        // 直接杀死 SpringBoard —— 而且不留崩溃报告。
+        // 端口上等回复。只要端口还在，内核就把线程扣在异常里，它永远不会真的执行到标记
+        // 地址；端口一旦不可投递，线程下一次被调度就会在 0x101/0x201/0x301/0x401 上取指，
+        // 直接杀死 SpringBoard。
         //
-        // 这条路径以前只在"关闭悬浮窗"时走到，而用户遇到的是反复前后台切换后第三次
-        // 打开即重载，正好符合"每次启用泄漏一条"的累积特征。
+        // 三份崩溃报告完全一致地指向这一点：faultingThread 都是那条只有两帧的被注入
+        // pthread（0x401 -> thread_start），死因是 EXC_ARM_DA_ALIGN at 0x401。而报告里
+        // x9 = 0xa1a1a1a1（malloc 释放块填充模式），说明 RemoteCall 对象当时已经被回收。
+        // 对象一释放，ARC 就带走异常端口的发送权 —— 那就是线程被放出来的时刻。
         if (g_springBoard) {
             RemoteCall *previous = g_springBoard;
             g_springBoard = nil;
+            // 收尾动作必须在受控路径上完成，而且对象本身要活到最后。
+            // ds_retire_connection 会永久持有它，杜绝"引用计数归零 -> 端口被释放 ->
+            // 被注入线程在标记地址上取指"这条链条。
+            ds_retire_connection(previous);
             @try {
                 ds_append_checkpoint(@"destroying previous SpringBoard connection before reconnecting");
                 ds_remove_springboard_hud(previous);
@@ -2439,6 +2471,7 @@ static void ds_finish_enable(void) {
             // 否则那条线程会被留在标记地址上成为孤儿：反复重试会不断累积，
             // 最终被内核调度时杀死 SpringBoard。
             if (g_springBoard) {
+                ds_retire_connection(g_springBoard);
                 @try {
                     [g_springBoard destroyRemoteCall];
                 } @catch (__unused NSException *exception) {
@@ -2455,6 +2488,7 @@ static void ds_finish_enable(void) {
         ds_set_stage(ds_localized(@"Creating SpringBoard HUD"));
         g_remoteLabel = ds_create_springboard_hud(g_springBoard);
         if (!g_remoteLabel) {
+            ds_retire_connection(g_springBoard);
             [g_springBoard destroyRemoteCall];
             g_springBoard = nil;
             ds_fail_enable(ds_localized(@"SpringBoard HUD creation failed. Retry or reinstall over the existing app; restart the device only as a last resort."));
@@ -2463,6 +2497,7 @@ static void ds_finish_enable(void) {
     } @catch (NSException *exception) {
         // 同上：异常路径也必须销毁连接，避免留下孤儿线程。
         if (g_springBoard) {
+            ds_retire_connection(g_springBoard);
             @try {
                 [g_springBoard destroyRemoteCall];
             } @catch (__unused NSException *inner) {
