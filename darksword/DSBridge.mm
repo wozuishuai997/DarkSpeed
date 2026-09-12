@@ -609,7 +609,7 @@ static void ds_write_heartbeat_line(void) {
         g_rpcHealthLost.store(true);
         ds_append_checkpoint([NSString stringWithFormat:
             @"RPC layer reported failures (wait=%llu second=%llu unexpected=%llu faultAtEntry=%llu replyFailed=%llu)"
-             " — stopping all remote calls to keep the injected thread from being released onto a marker address",
+             " - stopping all remote calls to keep the injected thread from being released onto a marker address",
             rpcWait, rpcSecond, rpcUnexpected, rpcFaultEntry, rpcReplyFailed]);
     }
 
