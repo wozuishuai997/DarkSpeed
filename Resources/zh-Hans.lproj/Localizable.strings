@@ -219,6 +219,8 @@
 
 /* HUD appearance */
 "Bold Text" = "文字加粗";
+"Detailed Logging" = "详细日志";
+"ON (Files/DarkSpeed)" = "已开启（文件 App/DarkSpeed）";
 "Background" = "背景";
 "Transparent" = "透明";
 "Original" = "原样";

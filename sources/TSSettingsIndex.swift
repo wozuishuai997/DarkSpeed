@@ -22,6 +22,7 @@ enum TSSettingsIndex: Int, CaseIterable {
     case transparentBackground
     case horizontalOffset
     case refreshInterval
+    case detailedLogging
 
     var key: String {
         switch self {
@@ -53,6 +54,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return HUDUserDefaultsKeyRefreshInterval
         case .transparentBackground:
             return HUDUserDefaultsKeyTransparentBackground
+        case .detailedLogging:
+            return HUDUserDefaultsKeyDetailedLogging
         }
     }
 
@@ -86,6 +89,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return NSLocalizedString("Refresh Interval", comment: "TSSettingsIndex")
         case .transparentBackground:
             return NSLocalizedString("Background", comment: "TSSettingsIndex")
+        case .detailedLogging:
+            return NSLocalizedString("Detailed Logging", comment: "TSSettingsIndex")
         }
     }
 
@@ -129,6 +134,11 @@ enum TSSettingsIndex: Int, CaseIterable {
             return String(format: NSLocalizedString("Every %g seconds", comment: "TSSettingsIndex"), refreshInterval)
         case .transparentBackground:
             return highlighted ? NSLocalizedString("Transparent", comment: "TSSettingsIndex") : NSLocalizedString("Original", comment: "TSSettingsIndex")
+        case .detailedLogging:
+            // 提示日志存放位置，用户无需再问。
+            return highlighted
+                ? NSLocalizedString("ON (Files/DarkSpeed)", comment: "TSSettingsIndex")
+                : NSLocalizedString("OFF", comment: "TSSettingsIndex")
         }
     }
 }

@@ -50,11 +50,44 @@ static void ds_post_progress(void) {
     });
 }
 
+// 日志目录固定在 Documents 下：Info.plist 已开启 UIFileSharingEnabled，
+// 因此可通过「文件」App / Finder / iMazing 直接取出，无需越狱工具。
+// 路径与目录创建只做一次并缓存，避免在循环里重复系统调用。
+static NSString *ds_log_directory(void) {
+    static NSString *cached = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docs = paths.firstObject;
+        if (!docs.length) return;
+        NSString *dir = [docs stringByAppendingPathComponent:@"DarkSpeedLogs"];
+        [NSFileManager.defaultManager createDirectoryAtPath:dir
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:nil];
+        cached = dir;
+    });
+    return cached;
+}
+
+// 单文件上限 2MB，超出后轮转为 .1，保留最近一段而不是最早的。
+static const unsigned long long kDSLogFileLimit = 2ULL * 1024 * 1024;
+
+static void ds_rotate_log_if_needed(NSString *path, unsigned long long incoming) {
+    if (!path.length) return;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSDictionary *attributes = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long size = [attributes[NSFileSize] unsignedLongLongValue];
+    if (size + incoming <= kDSLogFileLimit) return;
+    NSString *previous = [path stringByAppendingPathExtension:@"1"];
+    [fm removeItemAtPath:previous error:nil];
+    [fm moveItemAtPath:path toPath:previous error:nil];
+}
+
 static NSString *ds_checkpoint_log_path(void) {
-    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(
-        NSLibraryDirectory, NSUserDomainMask, YES);
-    NSString *library = paths.firstObject;
-    return library.length ? [library stringByAppendingPathComponent:@"DSBridge.log"] : nil;
+    NSString *dir = ds_log_directory();
+    return dir.length ? [dir stringByAppendingPathComponent:@"DSBridge.log"] : nil;
 }
 
 static void ds_append_checkpoint(NSString *message) {
@@ -63,6 +96,7 @@ static void ds_append_checkpoint(NSString *message) {
     NSString *line = [NSString stringWithFormat:@"%@  %@\n", NSDate.date, message];
     NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
     if (!data) return;
+    ds_rotate_log_if_needed(path, data.length);
     NSFileManager *fm = NSFileManager.defaultManager;
     if (![fm fileExistsAtPath:path]) {
         [data writeToFile:path options:NSDataWritingAtomic error:nil];
@@ -80,6 +114,130 @@ static void ds_append_checkpoint(NSString *message) {
 }
 
 #if USE_DARKSWORD
+// ---------------------------------------------------------------------------
+// 运行时诊断日志
+//
+// 设计约束（来自 1.0-19 的失败）：绝不在远程调用热路径上做文件 IO。
+//   * 底层事件只入内存环形缓冲，热路径开销是一次加锁 + 一次 strlcpy；
+//   * 只有定时器（30 秒）或 HUD 状态变化时才真正写盘；
+//   * 不使用 freopen/setvbuf，不接管 stdout。
+// 开关为设置里的「详细日志」，默认关闭。
+// ---------------------------------------------------------------------------
+#define DS_DIAG_RING_LINES 64
+#define DS_DIAG_LINE_MAX 192
+
+static char g_diagRing[DS_DIAG_RING_LINES][DS_DIAG_LINE_MAX];
+static int g_diagRingHead = 0;      // 下一个写入位置
+static int g_diagRingCount = 0;     // 已填充条数
+static os_unfair_lock g_diagLock = OS_UNFAIR_LOCK_INIT;
+static dispatch_source_t g_diagTimer = nil;
+static uint64_t g_diagEvents = 0;   // 本次会话累计事件数
+static std::atomic_bool g_diagEnabled(false);
+
+static NSString *ds_diag_log_path(void) {
+    NSString *dir = ds_log_directory();
+    return dir.length ? [dir stringByAppendingPathComponent:@"Runtime.log"] : nil;
+}
+
+// 底层线程回调入口：只入内存，不做任何 IO。
+static void ds_diag_record(const char *message) {
+    if (!message || !message[0]) return;
+    os_unfair_lock_lock(&g_diagLock);
+    snprintf(g_diagRing[g_diagRingHead], DS_DIAG_LINE_MAX, "%s", message);
+    g_diagRingHead = (g_diagRingHead + 1) % DS_DIAG_RING_LINES;
+    if (g_diagRingCount < DS_DIAG_RING_LINES) g_diagRingCount++;
+    g_diagEvents++;
+    os_unfair_lock_unlock(&g_diagLock);
+}
+
+static NSString *ds_diag_snapshot(void) {
+    NSMutableString *out = [NSMutableString string];
+    UIDevice *device = UIDevice.currentDevice;
+    [out appendFormat:@"== %@  uptime=%.0fs events=%llu\n",
+         NSDate.date,
+         g_diagEvents ? CFAbsoluteTimeGetCurrent() - g_watchdogStart : 0.0,
+         g_diagEvents];
+    [out appendFormat:@"hudActive=%d requested=%d label=%d window=%d container=%d\n",
+         g_hudActive.load() ? 1 : 0,
+         g_hudRequested.load() ? 1 : 0,
+         g_remoteLabel ? 1 : 0,
+         g_remoteWindow ? 1 : 0,
+         g_remoteContainer ? 1 : 0];
+    if (g_springBoard) {
+        [out appendFormat:@"remote pid=%d trojanMem=0x%llx lastError=%@\n",
+             g_springBoard.pid,
+             g_springBoard.trojanMem,
+             g_springBoard.lastError.length ? g_springBoard.lastError : @"(none)"];
+    }
+    [out appendFormat:@"os=%@ %@\n", device.systemName ?: @"?", device.systemVersion ?: @"?"];
+
+    os_unfair_lock_lock(&g_diagLock);
+    int count = g_diagRingCount;
+    int start = (g_diagRingHead - count + DS_DIAG_RING_LINES) % DS_DIAG_RING_LINES;
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (int i = 0; i < count; i++) {
+        const char *line = g_diagRing[(start + i) % DS_DIAG_RING_LINES];
+        if (line[0]) [lines addObject:[NSString stringWithUTF8String:line] ?: @"?"];
+    }
+    g_diagRingCount = 0; // 已消费，避免重复落盘
+    os_unfair_lock_unlock(&g_diagLock);
+
+    for (NSString *line in lines) [out appendFormat:@"  %@\n", line];
+    return out;
+}
+
+static void ds_diag_flush(void) {
+    if (!g_diagEnabled.load()) return;
+    NSString *path = ds_diag_log_path();
+    if (!path.length) return;
+    NSString *text = ds_diag_snapshot();
+    if (!text.length) return;
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data.length) return;
+    ds_rotate_log_if_needed(path, data.length);
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!handle) {
+        [data writeToFile:path options:NSDataWritingAtomic error:nil];
+        return;
+    }
+    @try {
+        [handle seekToEndOfFile];
+        [handle writeData:data];
+        [handle synchronizeFile];
+    } @catch (__unused NSException *exception) {
+    }
+    [handle closeFile];
+}
+
+static void ds_diag_configure(BOOL enabled) {
+    g_diagEnabled.store(enabled);
+    if (enabled) {
+        // 底层回调只需注册一次。
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{ rc_set_diag_log(ds_diag_record); });
+        if (!g_diagTimer) {
+            g_diagTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+            dispatch_source_set_timer(g_diagTimer,
+                                      dispatch_time(DISPATCH_TIME_NOW, 30ull * NSEC_PER_SEC),
+                                      30ull * NSEC_PER_SEC,
+                                      5ull * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(g_diagTimer, ^{
+                @autoreleasepool { ds_diag_flush(); }
+            });
+            dispatch_resume(g_diagTimer);
+        }
+        ds_append_checkpoint(@"detailed logging enabled");
+        ds_diag_flush();
+    } else {
+        if (g_diagTimer) {
+            dispatch_source_cancel(g_diagTimer);
+            g_diagTimer = nil;
+        }
+        ds_append_checkpoint(@"detailed logging disabled");
+    }
+}
+
 static void ds_set_stage(NSString *stage) {
     NSString *next = [stage copy] ?: @"";
     os_unfair_lock_lock(&g_errorLock);
@@ -1536,6 +1694,8 @@ static void ds_register_hud_notifications(void) {
         (void)token;
         if (!g_hudActive.load()) return;
         NSDictionary *preferences = ds_hud_preferences();
+        // 「详细日志」开关按设置实时生效。
+        ds_diag_configure(ds_pref_bool(preferences, HUDUserDefaultsKeyDetailedLogging));
         ds_configure_rate_timer(preferences);
         ds_append_checkpoint([NSString stringWithFormat:
             @"HUD settings refreshed position=%@ size=%@ snapshot=%@",
@@ -1704,6 +1864,9 @@ static void ds_finish_disable(void) {
 
 static void ds_finish_enable(void) {
     if (!g_hudRequested.load()) return;
+    // 按设置决定是否记录诊断日志（默认关闭）。
+    (void)ds_log_directory();
+    ds_diag_configure(ds_pref_bool(ds_hud_preferences(), HUDUserDefaultsKeyDetailedLogging));
     g_dsRunning.store(true);
     g_dsProgress.store(0.0);
     ds_set_stage(ds_localized(@"Preparing startup"));

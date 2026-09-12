@@ -219,6 +219,8 @@
 
 /* HUD appearance */
 "Bold Text" = "Bold Text";
+"Detailed Logging" = "Detailed Logging";
+"ON (Files/DarkSpeed)" = "ON (Files/DarkSpeed)";
 "Background" = "Background";
 "Transparent" = "Transparent";
 "Original" = "Original";

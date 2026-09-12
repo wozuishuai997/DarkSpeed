@@ -41,6 +41,8 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesBoldFont = @"usesBoldFont"
 static HUDUserDefaultsKey const HUDUserDefaultsKeyTransparentBackground = @"transparentBackground";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyHorizontalOffset = @"horizontalOffset";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRefreshInterval = @"refreshInterval";
+// 详细日志开关。默认关闭：只在需要排查时打开，避免常态写盘。
+static HUDUserDefaultsKey const HUDUserDefaultsKeyDetailedLogging = @"detailedLogging";
 
 static inline double HUDRefreshInterval(NSDictionary *preferences) {
     NSNumber *interval = preferences[HUDUserDefaultsKeyRefreshInterval];
